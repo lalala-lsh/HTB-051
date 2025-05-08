@@ -87,3 +87,92 @@ esp_err_t get_spi_pins(spi_bus_config_t* spi_config,
     spi_config->sclk_io_num = -1;
     spi_config->quadwp_io_num = -1;
     spi_config->quadhd_io_num = -1;
+
+    spi_device_interface_config->spics_io_num = -1;
+
+    ESP_LOGW(TAG, "SPI interface is not supported");
+    return ESP_OK;
+}
+
+// sdcard
+
+int8_t get_sdcard_intr_gpio(void)
+{
+    return SDCARD_INTR_GPIO;
+}
+
+int8_t get_sdcard_open_file_num_max(void)
+{
+    return SDCARD_OPEN_FILE_NUM_MAX;
+}
+
+int8_t get_sdcard_power_ctrl_gpio(void)
+{
+    return SDCARD_PWR_CTRL;
+}
+
+// input-output pins
+
+int8_t get_headphone_detect_gpio(void)
+{
+    return HEADPHONE_DETECT;
+}
+
+int8_t get_pa_enable_gpio(void)
+{
+    return PA_ENABLE_GPIO;
+}
+
+// adc button id
+
+int8_t get_input_rec_id(void)
+{
+    return BUTTON_REC_ID;
+}
+
+int8_t get_input_mode_id(void)
+{
+    return BUTTON_MODE_ID;
+}
+
+int8_t get_input_set_id(void)
+{
+    return BUTTON_SET_ID;
+}
+
+int8_t get_input_play_id(void)
+{
+    return BUTTON_PLAY_ID;
+}
+
+int8_t get_input_volup_id(void)
+{
+    return BUTTON_VOLUP_ID;
+}
+
+int8_t get_input_voldown_id(void)
+{
+    return BUTTON_VOLDOWN_ID;
+}
+
+// led pins
+
+int8_t get_green_led_gpio(void)
+{
+    return GREEN_LED_GPIO;
+}
+
+int8_t get_blue_led_gpio(void)
+{
+    return BLUE_LED_GPIO;
+}
+
+int8_t get_es8311_mclk_src(void)
+{
+    return ES8311_MCLK_SOURCE;
+}
+
+int8_t get_es7243_mclk_gpio(void)
+{
+    return ES7243_MCLK_GPIO;
+}
