@@ -188,3 +188,99 @@ static const struct _coeff_div coeff_div[] = {
     {1536000 , 64000, 0x01, 0x08, 0x01, 0x01, 0x01, 0x00, 0xbf, 0x03, 0x18, 0x18},
     {1024000 , 64000, 0x01, 0x08, 0x01, 0x01, 0x01, 0x00, 0x7f, 0x02, 0x10, 0x10},
 
+    /* 88.2k */
+    {11289600, 88200, 0x01, 0x02, 0x01, 0x01, 0x00, 0x00, 0xff, 0x04, 0x10, 0x10},
+    {5644800 , 88200, 0x01, 0x04, 0x01, 0x01, 0x00, 0x00, 0xff, 0x04, 0x10, 0x10},
+    {2822400 , 88200, 0x01, 0x08, 0x01, 0x01, 0x00, 0x00, 0xff, 0x04, 0x10, 0x10},
+    {1411200 , 88200, 0x01, 0x08, 0x01, 0x01, 0x01, 0x00, 0x7f, 0x02, 0x10, 0x10},
+
+    /* 96k */
+    {12288000, 96000, 0x01, 0x02, 0x01, 0x01, 0x00, 0x00, 0xff, 0x04, 0x10, 0x10},
+    {18432000, 96000, 0x03, 0x04, 0x01, 0x01, 0x00, 0x00, 0xff, 0x04, 0x10, 0x10},
+    {6144000 , 96000, 0x01, 0x04, 0x01, 0x01, 0x00, 0x00, 0xff, 0x04, 0x10, 0x10},
+    {3072000 , 96000, 0x01, 0x08, 0x01, 0x01, 0x00, 0x00, 0xff, 0x04, 0x10, 0x10},
+    {1536000 , 96000, 0x01, 0x08, 0x01, 0x01, 0x01, 0x00, 0x7f, 0x02, 0x10, 0x10},
+};
+
+static char *TAG = "DRV8311";
+
+#define ES_ASSERT(a, format, b, ...) \
+    if ((a) != 0) { \
+        ESP_LOGE(TAG, format, ##__VA_ARGS__); \
+        return b;\
+    }
+
+int8_t get_es8311_mclk_src(void);
+
+static esp_err_t es8311_write_reg(uint8_t reg_addr, uint8_t data)
+{
+    return i2c_bus_write_bytes(i2c_handle, ES8311_ADDR, &reg_addr, sizeof(reg_addr), &data, sizeof(data));
+}
+
+static int es8311_read_reg(uint8_t reg_addr)
+{
+    uint8_t data;
+    i2c_bus_read_bytes(i2c_handle, ES8311_ADDR, &reg_addr, sizeof(reg_addr), &data, sizeof(data));
+    return (int)data;
+}
+
+static int i2c_init()
+{
+    int res = 0;
+    i2c_config_t es_i2c_cfg = {
+        .mode = I2C_MODE_MASTER,
+        .sda_pullup_en = GPIO_PULLUP_ENABLE,
+        .scl_pullup_en = GPIO_PULLUP_ENABLE,
+        .master.clk_speed = 100000,
+    };
+    res = get_i2c_pins(I2C_NUM_0, &es_i2c_cfg);
+    ES_ASSERT(res, "getting i2c pins error", -1);
+    i2c_handle = i2c_bus_create(I2C_NUM_0, &es_i2c_cfg);
+    return res;
+}
+
+/*
+* look for the coefficient in coeff_div[] table
+*/
+static int get_coeff(uint32_t mclk, uint32_t rate)
+{
+    for (int i = 0; i < (sizeof(coeff_div) / sizeof(coeff_div[0])); i++) {
+        if (coeff_div[i].rate == rate && coeff_div[i].mclk == mclk)
+            return i;
+    }
+    return -1;
+}
+
+/*
+* set es8311 dac mute or not
+* if mute = 0, dac un-mute
+* if mute = 1, dac mute
+*/
+static void es8311_mute(int mute)
+{
+    uint8_t regv;
+    ESP_LOGI(TAG, "Enter into es8311_mute(), mute = %d\n", mute);
+    regv = es8311_read_reg(ES8311_DAC_REG31) & 0x9f;
+    if (mute) {
+        es8311_write_reg(ES8311_DAC_REG31, regv | 0x60);
+    } else {
+        es8311_write_reg(ES8311_DAC_REG31, regv);
+    }
+}
+
+/*
+* set es8311 into suspend mode
+*/
+static void es8311_suspend(void)
+{
+    ESP_LOGI(TAG, "Enter into es8311_suspend()");
+    es8311_write_reg(ES8311_DAC_REG32, 0x00);
+    es8311_write_reg(ES8311_ADC_REG17, 0x00);
+    es8311_write_reg(ES8311_SYSTEM_REG0E, 0xFF);
+    es8311_write_reg(ES8311_SYSTEM_REG12, 0x02);
+    es8311_write_reg(ES8311_SYSTEM_REG14, 0x00);
+    es8311_write_reg(ES8311_SYSTEM_REG0D, 0xFA);
+    es8311_write_reg(ES8311_ADC_REG15, 0x00);
+    es8311_write_reg(ES8311_GP_REG45, 0x01);
+}
+
