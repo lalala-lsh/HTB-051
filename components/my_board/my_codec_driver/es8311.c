@@ -284,3 +284,98 @@ static void es8311_suspend(void)
     es8311_write_reg(ES8311_GP_REG45, 0x01);
 }
 
+/*
+* enable pa power
+*/
+esp_err_t es8311_pa_power(bool enable)
+{
+    esp_err_t ret = ESP_OK;
+    if (enable) {
+        ret = gpio_set_level(get_pa_enable_gpio(), 0);
+    } else {
+        ret = gpio_set_level(get_pa_enable_gpio(), 1);
+    }
+    return ret;
+}
+
+esp_err_t es8311_codec_init(audio_hal_codec_config_t *codec_cfg)
+{
+    uint8_t datmp, regv;
+    int coeff;
+    esp_err_t ret = ESP_OK;
+    i2c_init(); // ESP32 in master mode
+
+    /* Enhance ES8311 I2C noise immunity */
+    ret |= es8311_write_reg(ES8311_GPIO_REG44, 0x08);
+    /* Due to occasional failures during the first I2C write with the ES8311 chip, a second write is performed to ensure reliability */
+    ret |= es8311_write_reg(ES8311_GPIO_REG44, 0x08);
+
+    ret |= es8311_write_reg(ES8311_CLK_MANAGER_REG01, 0x30);
+    ret |= es8311_write_reg(ES8311_CLK_MANAGER_REG02, 0x00);
+    ret |= es8311_write_reg(ES8311_CLK_MANAGER_REG03, 0x10);
+    ret |= es8311_write_reg(ES8311_ADC_REG16, 0x24);
+    ret |= es8311_write_reg(ES8311_CLK_MANAGER_REG04, 0x10);
+    ret |= es8311_write_reg(ES8311_CLK_MANAGER_REG05, 0x00);
+    ret |= es8311_write_reg(ES8311_SYSTEM_REG0B, 0x00);
+    ret |= es8311_write_reg(ES8311_SYSTEM_REG0C, 0x00);
+    ret |= es8311_write_reg(ES8311_SYSTEM_REG10, 0x1F);
+    ret |= es8311_write_reg(ES8311_SYSTEM_REG11, 0x7F);
+    ret |= es8311_write_reg(ES8311_RESET_REG00, 0x80);
+    /*
+     * Set Codec into Master or Slave mode
+     */
+    regv = es8311_read_reg(ES8311_RESET_REG00);
+    /*
+     * Set master/slave audio interface
+     */
+    audio_hal_codec_i2s_iface_t *i2s_cfg = &(codec_cfg->i2s_iface);
+    switch (i2s_cfg->mode) {
+        case AUDIO_HAL_MODE_MASTER:    /* MASTER MODE */
+            ESP_LOGI(TAG, "ES8311 in Master mode");
+            regv |= 0x40;
+            break;
+        case AUDIO_HAL_MODE_SLAVE:    /* SLAVE MODE */
+            ESP_LOGI(TAG, "ES8311 in Slave mode");
+            regv &= 0xBF;
+            break;
+        default:
+            regv &= 0xBF;
+    }
+    ret |= es8311_write_reg(ES8311_RESET_REG00, regv);
+    ret |= es8311_write_reg(ES8311_CLK_MANAGER_REG01, 0x3F);
+    /*
+     * Select clock source for internal mclk
+     */
+    switch (get_es8311_mclk_src()) {
+        case FROM_MCLK_PIN:
+            regv = es8311_read_reg(ES8311_CLK_MANAGER_REG01);
+            regv &= 0x7F;
+            ret |= es8311_write_reg(ES8311_CLK_MANAGER_REG01, regv);
+            break;
+        case FROM_SCLK_PIN:
+            regv = es8311_read_reg(ES8311_CLK_MANAGER_REG01);
+            regv |= 0x80;
+            ret |= es8311_write_reg(ES8311_CLK_MANAGER_REG01, regv);
+            break;
+        default:
+            regv = es8311_read_reg(ES8311_CLK_MANAGER_REG01);
+            regv &= 0x7F;
+            ret |= es8311_write_reg(ES8311_CLK_MANAGER_REG01, regv);
+            break;
+    }
+    int sample_fre = 0;
+    int mclk_fre = 0;
+    switch (i2s_cfg->samples) {
+        case AUDIO_HAL_08K_SAMPLES:
+            sample_fre = 8000;
+            break;
+        case AUDIO_HAL_11K_SAMPLES:
+            sample_fre = 11025;
+            break;
+        case AUDIO_HAL_16K_SAMPLES:
+            sample_fre = 16000;
+            break;
+        case AUDIO_HAL_22K_SAMPLES:
+            sample_fre = 22050;
+            break;
+        case AUDIO_HAL_24K_SAMPLES:
