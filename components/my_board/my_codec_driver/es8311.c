@@ -474,3 +474,99 @@ esp_err_t es8311_codec_init(audio_hal_codec_config_t *codec_cfg)
         ret |= es8311_write_reg(ES8311_CLK_MANAGER_REG01, regv);
     }
     /*
+     * sclk inverted or not
+     */
+    if (INVERT_SCLK) {
+        regv = es8311_read_reg(ES8311_CLK_MANAGER_REG06);
+        regv |= 0x20;
+        ret |= es8311_write_reg(ES8311_CLK_MANAGER_REG06, regv);
+    } else {
+        regv = es8311_read_reg(ES8311_CLK_MANAGER_REG06);
+        regv &= ~(0x20);
+        ret |= es8311_write_reg(ES8311_CLK_MANAGER_REG06, regv);
+    }
+
+    ret |= es8311_write_reg(ES8311_SYSTEM_REG13, 0x10);
+    ret |= es8311_write_reg(ES8311_ADC_REG1B, 0x0A);
+    ret |= es8311_write_reg(ES8311_ADC_REG1C, 0x6A);
+    AUDIO_RET_ON_FALSE(TAG, ret, return ret, "es8311 initialize failed");
+
+    /* pa power gpio init */
+    gpio_config_t  io_conf;
+    memset(&io_conf, 0, sizeof(io_conf));
+    io_conf.mode = GPIO_MODE_OUTPUT;
+    io_conf.pin_bit_mask = BIT64(get_pa_enable_gpio());
+    io_conf.pull_down_en = 0;
+    io_conf.pull_up_en = 0;
+    gpio_config(&io_conf);
+    /* enable pa power */
+    es8311_pa_power(true);
+
+    codec_dac_volume_config_t vol_cfg = ES8311_DAC_VOL_CFG_DEFAULT();
+    dac_vol_handle = audio_codec_volume_init(&vol_cfg);
+    return ESP_OK;
+}
+
+esp_err_t es8311_codec_deinit()
+{
+    i2c_bus_delete(i2c_handle);
+    audio_codec_volume_deinit(dac_vol_handle);
+    return ESP_OK;
+}
+
+esp_err_t es8311_config_fmt(es_i2s_fmt_t fmt)
+{
+    esp_err_t ret = ESP_OK;
+    uint8_t adc_iface = 0, dac_iface = 0;
+    dac_iface = es8311_read_reg(ES8311_SDPIN_REG09);
+    adc_iface = es8311_read_reg(ES8311_SDPOUT_REG0A);
+    switch (fmt) {
+        case AUDIO_HAL_I2S_NORMAL:
+            ESP_LOGD(TAG, "ES8311 in I2S Format");
+            dac_iface &= 0xFC;
+            adc_iface &= 0xFC;
+            break;
+        case AUDIO_HAL_I2S_LEFT:
+        case AUDIO_HAL_I2S_RIGHT:
+            ESP_LOGD(TAG, "ES8311 in LJ Format");
+            adc_iface &= 0xFC;
+            dac_iface &= 0xFC;
+            adc_iface |= 0x01;
+            dac_iface |= 0x01;
+            break;
+        case AUDIO_HAL_I2S_DSP:
+            ESP_LOGD(TAG, "ES8311 in DSP-A Format");
+            adc_iface &= 0xDC;
+            dac_iface &= 0xDC;
+            adc_iface |= 0x03;
+            dac_iface |= 0x03;
+            break;
+        default:
+            dac_iface &= 0xFC;
+            adc_iface &= 0xFC;
+            break;
+    }
+    ret |= es8311_write_reg(ES8311_SDPIN_REG09, dac_iface);
+    ret |= es8311_write_reg(ES8311_SDPOUT_REG0A, adc_iface);
+
+    return ret;
+}
+
+esp_err_t es8311_set_bits_per_sample(audio_hal_iface_bits_t bits)
+{
+    esp_err_t ret = ESP_OK;
+    uint8_t adc_iface = 0, dac_iface = 0;
+    dac_iface = es8311_read_reg(ES8311_SDPIN_REG09);
+    adc_iface = es8311_read_reg(ES8311_SDPOUT_REG0A);
+    switch (bits) {
+        case AUDIO_HAL_BIT_LENGTH_16BITS:
+            dac_iface |= 0x0c;
+            adc_iface |= 0x0c;
+            break;
+        case AUDIO_HAL_BIT_LENGTH_24BITS:
+            break;
+        case AUDIO_HAL_BIT_LENGTH_32BITS:
+            dac_iface |= 0x10;
+            adc_iface |= 0x10;
+            break;
+        default:
