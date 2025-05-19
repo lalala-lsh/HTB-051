@@ -570,3 +570,98 @@ esp_err_t es8311_set_bits_per_sample(audio_hal_iface_bits_t bits)
             adc_iface |= 0x10;
             break;
         default:
+            dac_iface |= 0x0c;
+            adc_iface |= 0x0c;
+            break;
+
+    }
+    ret |= es8311_write_reg(ES8311_SDPIN_REG09, dac_iface);
+    ret |= es8311_write_reg(ES8311_SDPOUT_REG0A, adc_iface);
+
+    return ret;
+}
+
+esp_err_t es8311_codec_config_i2s(audio_hal_codec_mode_t mode, audio_hal_codec_i2s_iface_t *iface)
+{
+    int ret = ESP_OK;
+    ret |= es8311_set_bits_per_sample(iface->bits);
+    ret |= es8311_config_fmt(iface->fmt);
+    return ret;
+}
+
+esp_err_t es8311_codec_ctrl_state(audio_hal_codec_mode_t mode, audio_hal_ctrl_t ctrl_state)
+{
+    esp_err_t ret = ESP_OK;
+    es_module_t es_mode = ES_MODULE_MIN;
+
+    switch (mode) {
+        case AUDIO_HAL_CODEC_MODE_ENCODE:
+            es_mode  = ES_MODULE_ADC;
+            break;
+        case AUDIO_HAL_CODEC_MODE_LINE_IN:
+            es_mode  = ES_MODULE_LINE;
+            break;
+        case AUDIO_HAL_CODEC_MODE_DECODE:
+            es_mode  = ES_MODULE_DAC;
+            break;
+        case AUDIO_HAL_CODEC_MODE_BOTH:
+            es_mode  = ES_MODULE_ADC_DAC;
+            break;
+        default:
+            es_mode = ES_MODULE_DAC;
+            ESP_LOGW(TAG, "Codec mode not support, default is decode mode");
+            break;
+    }
+
+    if (ctrl_state == AUDIO_HAL_CTRL_START) {
+        ret |= es8311_start(es_mode);
+    } else {
+        ESP_LOGW(TAG, "The codec is about to stop");
+        ret |= es8311_stop(es_mode);
+    }
+
+    return ret;
+}
+
+esp_err_t es8311_start(es_module_t mode)
+{
+    esp_err_t ret = ESP_OK;
+    uint8_t adc_iface = 0, dac_iface = 0;
+
+    dac_iface = es8311_read_reg(ES8311_SDPIN_REG09) & 0xBF;
+    adc_iface = es8311_read_reg(ES8311_SDPOUT_REG0A) & 0xBF;
+    adc_iface |= BIT(6);
+    dac_iface |= BIT(6);
+
+    if (mode == ES_MODULE_LINE) {
+        ESP_LOGE(TAG, "The codec es8311 doesn't support ES_MODULE_LINE mode");
+        return ESP_FAIL;
+    }
+    if (mode == ES_MODULE_ADC || mode == ES_MODULE_ADC_DAC) {
+        adc_iface &= ~(BIT(6));
+    }
+    if (mode == ES_MODULE_DAC || mode == ES_MODULE_ADC_DAC) {
+        dac_iface &= ~(BIT(6));
+    }
+
+    ret |= es8311_write_reg(ES8311_SDPIN_REG09, dac_iface);
+    ret |= es8311_write_reg(ES8311_SDPOUT_REG0A, adc_iface);
+
+    ret |= es8311_write_reg(ES8311_ADC_REG17, 0xBF);
+    ret |= es8311_write_reg(ES8311_SYSTEM_REG0E, 0x02);
+    ret |= es8311_write_reg(ES8311_SYSTEM_REG12, 0x00);
+    ret |= es8311_write_reg(ES8311_SYSTEM_REG14, 0x1A);
+
+    /*
+     * pdm dmic enable or disable
+     */
+    int regv = 0;
+    if (IS_DMIC) {
+        regv = es8311_read_reg(ES8311_SYSTEM_REG14);
+        regv |= 0x40;
+        ret |= es8311_write_reg(ES8311_SYSTEM_REG14, regv);
+    } else {
+        regv = es8311_read_reg(ES8311_SYSTEM_REG14);
+        regv &= ~(0x40);
+        ret |= es8311_write_reg(ES8311_SYSTEM_REG14, regv);
+    }
