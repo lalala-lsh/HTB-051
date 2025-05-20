@@ -665,3 +665,98 @@ esp_err_t es8311_start(es_module_t mode)
         regv &= ~(0x40);
         ret |= es8311_write_reg(ES8311_SYSTEM_REG14, regv);
     }
+
+    ret |= es8311_write_reg(ES8311_SYSTEM_REG0D, 0x01);
+    ret |= es8311_write_reg(ES8311_ADC_REG15, 0x40);
+    ret |= es8311_write_reg(ES8311_DAC_REG37, 0x08);
+    ret |= es8311_write_reg(ES8311_GP_REG45, 0x00);
+
+    /* set internal reference signal (ADCL + DACR) */
+    ret |= es8311_write_reg(ES8311_GPIO_REG44, 0x58);
+
+    return ret;
+}
+
+esp_err_t es8311_stop(es_module_t mode)
+{
+    esp_err_t ret = ESP_OK;
+    es8311_suspend();
+    return ret;
+}
+
+/**
+ * @brief Set voice volume
+ *
+ * @note Register values. 0x00: -95.5 dB, 0x5B: -50 dB, 0xBF: 0 dB, 0xFF: 32 dB
+ * @note Accuracy of gain is 0.5 dB
+ *
+ * @param volume: voice volume (0~100)
+ *
+ * @return
+ *     - ESP_OK
+ *     - ESP_FAIL
+ */
+esp_err_t es8311_codec_set_voice_volume(int volume)
+{
+    esp_err_t res = ESP_OK;
+    uint8_t reg = 0;
+    reg = audio_codec_get_dac_reg_value(dac_vol_handle, volume);
+    res = es8311_write_reg(ES8311_DAC_REG32, reg);
+    ESP_LOGD(TAG, "Set volume:%.2d reg_value:0x%.2x dB:%.1f", dac_vol_handle->user_volume, reg,
+            audio_codec_cal_dac_volume(dac_vol_handle));
+    return res;
+}
+
+esp_err_t es8311_codec_get_voice_volume(int *volume)
+{
+    esp_err_t res = ESP_OK;
+    int regv = 0;
+    regv = es8311_read_reg(ES8311_DAC_REG32);
+    if (regv == ESP_FAIL) {
+        *volume = 0;
+        res = ESP_FAIL;
+    } else {
+        if (regv == dac_vol_handle->reg_value) {
+            *volume = dac_vol_handle->user_volume;
+        } else {
+            *volume = 0;
+            res = ESP_FAIL;
+        }
+    }
+    ESP_LOGD(TAG, "Get volume:%.2d reg_value:0x%.2x", *volume, regv);
+    return res;
+}
+
+esp_err_t es8311_set_voice_mute(bool enable)
+{
+    ESP_LOGD(TAG, "Es8311SetVoiceMute volume:%d", enable);
+    es8311_mute(enable);
+    return ESP_OK;
+}
+
+esp_err_t es8311_get_voice_mute(int *mute)
+{
+    esp_err_t res = ESP_OK;
+    uint8_t reg = 0;
+    res = es8311_read_reg(ES8311_DAC_REG31);
+    if (res != ESP_FAIL) {
+        reg = (res & 0x20) >> 5;
+    }
+    *mute = reg;
+    return res;
+}
+
+esp_err_t es8311_set_mic_gain(es8311_mic_gain_t gain_db)
+{
+    esp_err_t res = ESP_OK;
+    res = es8311_write_reg(ES8311_ADC_REG16, gain_db); // MIC gain scale
+    return res;
+}
+
+void es8311_read_all()
+{
+    for (int i = 0; i < 0x4A; i++) {
+        uint8_t reg = es8311_read_reg(i);
+        ESP_LOGI(TAG, "REG:%02x, %02x", reg, i);
+    }
+}
