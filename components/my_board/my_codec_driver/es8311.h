@@ -93,3 +93,97 @@ extern "C" {
 #define ES8311_GPIO_REG44               0x44 /* GPIO, dac2adc for test */
 #define ES8311_GP_REG45                 0x45 /* GP CONTROL */
 /*
+ * CHIP
+ */
+#define ES8311_CHD1_REGFD               0xFD /* CHIP ID1 */
+#define ES8311_CHD2_REGFE               0xFE /* CHIP ID2 */
+#define ES8311_CHVER_REGFF              0xFF /* VERSION */
+#define ES8311_CHD1_REGFD               0xFD /* CHIP ID1 */
+
+#define ES8311_MAX_REGISTER             0xFF
+
+typedef enum {
+    ES8311_MIC_GAIN_MIN = -1,
+    ES8311_MIC_GAIN_0DB,
+    ES8311_MIC_GAIN_6DB,
+    ES8311_MIC_GAIN_12DB,
+    ES8311_MIC_GAIN_18DB,
+    ES8311_MIC_GAIN_24DB,
+    ES8311_MIC_GAIN_30DB,
+    ES8311_MIC_GAIN_36DB,
+    ES8311_MIC_GAIN_42DB,
+    ES8311_MIC_GAIN_MAX
+} es8311_mic_gain_t;
+
+/*
+ * @brief Enables or disables PA
+ *
+ * @param enable     true/false
+ *
+ * @return
+ *      - ESP_ERR_INVALID_ARG
+ *      - ESP_OK
+ */
+esp_err_t es8311_pa_power(bool enable);
+
+/*
+ * @brief Initialize ES8311 codec chip
+ *
+ * @param codec_cfg  configuration of ES8311
+ *
+ * @return
+ *      - ESP_OK
+ *      - ESP_FAIL
+ */
+esp_err_t es8311_codec_init(audio_hal_codec_config_t *codec_cfg);
+
+/**
+ * @brief Deinitialize ES8311 codec chip
+ *
+ * @return
+ *     - ESP_OK
+ *     - ESP_FAIL
+ */
+esp_err_t es8311_codec_deinit(void);
+
+/**
+ * @brief Control ES8311 codec chip
+ *
+ * @param mode codec mode
+ * @param ctrl_state start or stop decode or encode progress
+ *
+ * @return
+ *     - ESP_FAIL Parameter error
+ *     - ESP_OK   Success
+ */
+esp_err_t es8311_codec_ctrl_state(audio_hal_codec_mode_t mode, audio_hal_ctrl_t ctrl_state);
+
+/**
+ * @brief Configure ES8311 codec mode and I2S interface
+ *
+ * @param mode codec mode
+ * @param iface I2S config
+ *
+ * @return
+ *     - ESP_FAIL Parameter error
+ *     - ESP_OK   Success
+ */
+esp_err_t es8311_codec_config_i2s(audio_hal_codec_mode_t mode, audio_hal_codec_i2s_iface_t *iface);
+
+/**
+ * @brief Configure ES8311 DAC mute or not. Basically you can use this function to mute the output or unmute
+ *
+ * @param enable enable(1) or disable(0)
+ *
+ * @return
+ *     - ESP_FAIL Parameter error
+ *     - ESP_OK   Success
+ */
+esp_err_t es8311_set_voice_mute(bool enable);
+
+/**
+ * @brief Set voice volume
+ *
+ * @param volume:  voice volume (0~100)
+ *
+ * @return
