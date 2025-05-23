@@ -187,3 +187,98 @@ esp_err_t es8311_set_voice_mute(bool enable);
  * @param volume:  voice volume (0~100)
  *
  * @return
+ *     - ESP_OK
+ *     - ESP_FAIL
+ */
+esp_err_t es8311_codec_set_voice_volume(int volume);
+
+/**
+ * @brief Get voice volume
+ *
+ * @param[out] *volume:  voice volume (0~100)
+ *
+ * @return
+ *     - ESP_OK
+ *     - ESP_FAIL
+ */
+esp_err_t es8311_codec_get_voice_volume(int *volume);
+
+/**
+ * @brief Configure ES8311 I2S format
+ *
+ * @param mod:  set ADC or DAC or both
+ * @param cfg:   ES8388 I2S format
+ *
+ * @return
+ *     - ESP_OK
+ *     - ESP_FAIL
+ */
+esp_err_t es8311_config_fmt(es_i2s_fmt_t fmt);
+
+/**
+ * @brief Configure ES8311 data sample bits
+ *
+ * @param mode:  set ADC or DAC or both
+ * @param bit_per_sample:  bit number of per sample
+ *
+ * @return
+ *     - ESP_OK
+ *     - ESP_FAIL
+ */
+esp_err_t es8311_set_bits_per_sample(audio_hal_iface_bits_t bits);
+
+/**
+ * @brief  Start ES8311 codec chip
+ *
+ * @param mode:  set ADC or DAC or both
+ *
+ * @return
+ *     - ESP_OK
+ *     - ESP_FAIL
+ */
+esp_err_t es8311_start(es_module_t mode);
+
+/**
+ * @brief  Stop ES8311 codec chip
+ *
+ * @param mode:  set ADC or DAC or both
+ *
+ * @return
+ *     - ESP_OK
+ *     - ESP_FAIL
+ */
+esp_err_t es8311_stop(es_module_t mode);
+
+/**
+ * @brief Get ES8311 DAC mute status
+ *
+ * @return
+ *     - ESP_FAIL
+ *     - ESP_OK
+ */
+esp_err_t es8311_get_voice_mute(int *mute);
+
+/**
+ * @brief Set ES8311 mic gain
+ *
+ * @param gain db of mic gain
+ *
+ * @return
+ *     - ESP_FAIL Parameter error
+ *     - ESP_OK   Success
+ */
+esp_err_t es8311_set_mic_gain(es8311_mic_gain_t gain_db);
+
+/**
+ * @brief Print all ES8311 registers
+ *
+ * @return
+ *     - void
+ */
+void es8311_read_all();
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
