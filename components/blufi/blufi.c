@@ -99,3 +99,103 @@ static uint8_t blufi_service_uuid128[32] = {
 
 static esp_ble_adv_data_t blufi_adv_data = {
     .set_scan_rsp = false,
+    .include_name = true,
+    .include_txpower = true,
+    .min_interval = 0x0006, // slave connection min interval, Time = min_interval * 1.25 msec
+    .max_interval = 0x0010, // slave connection max interval, Time = max_interval * 1.25 msec
+    .appearance = 0x00,
+    .manufacturer_len = 0,
+    .p_manufacturer_data = NULL,
+    .service_data_len = 0,
+    .p_service_data = NULL,
+    .service_uuid_len = 16,
+    .p_service_uuid = blufi_service_uuid128,
+    .flag = 0x6,
+};
+
+EventGroupHandle_t get_wifi_event_group(void)
+{
+    return wifi_event_group;
+}
+
+/**
+ * @brief 启动BluFi广播,使用系统信息中的设备名称
+ *
+ * 该函数在BluFi初始化完成时调用,会设置设备名称并配置广播数据
+ * 支持Bluedroid和NimBLE两种协议栈
+ */
+static void mine_esp_blufi_adv_start(void)
+{
+    /* 获取设备名称 */
+    const char* device_name = get_device_name();
+
+#if CONFIG_BT_BLUEDROID_ENABLED
+    /* Bluedroid: 使用esp_ble_gap_set_device_name设置 */
+    esp_err_t ret = esp_ble_gap_set_device_name(device_name);
+    if (ret != ESP_OK) {
+        BLUFI_ERROR("Failed to set device name: %s\n", esp_err_to_name(ret));
+    }
+    else {
+        BLUFI_INFO("Device name set to: %s\n", device_name);
+    }
+
+    /* 配置广播数据 */
+    ret = esp_ble_gap_config_adv_data(&blufi_adv_data);
+    if (ret != ESP_OK) {
+        BLUFI_ERROR("Failed to config adv data: %s\n", esp_err_to_name(ret));
+    }
+#elif CONFIG_BT_NIMBLE_ENABLED
+    /* NimBLE: 使用ble_svc_gap_device_name_set设置 */
+    int rc = ble_svc_gap_device_name_set(device_name);
+    if (rc != 0) {
+        BLUFI_ERROR("Failed to set device name for NimBLE: %d\n", rc);
+    }
+    else {
+        BLUFI_INFO("Device name set to: %s (NimBLE)\n", device_name);
+    }
+#endif
+
+    BLUFI_INFO("BluFi advertising initialized with device name: %s\n", device_name);
+}
+
+static void example_record_wifi_conn_info(int rssi, uint8_t reason)
+{
+    memset(&gl_sta_conn_info, 0, sizeof(esp_blufi_extra_info_t));
+    if (gl_sta_is_connecting) {
+        gl_sta_conn_info.sta_max_conn_retry_set = true;
+        gl_sta_conn_info.sta_max_conn_retry = EXAMPLE_WIFI_CONNECTION_MAXIMUM_RETRY;
+    }
+    else {
+        gl_sta_conn_info.sta_conn_rssi_set = true;
+        gl_sta_conn_info.sta_conn_rssi = rssi;
+        gl_sta_conn_info.sta_conn_end_reason_set = true;
+        gl_sta_conn_info.sta_conn_end_reason = reason;
+    }
+}
+
+static void example_wifi_connect(void)
+{
+    example_wifi_retry = 0;
+    gl_sta_is_connecting = (esp_wifi_connect() == ESP_OK);
+    example_record_wifi_conn_info(EXAMPLE_INVALID_RSSI, EXAMPLE_INVALID_REASON);
+}
+
+static bool example_wifi_reconnect(void)
+{
+    bool ret;
+    if (gl_sta_is_connecting && example_wifi_retry++ < EXAMPLE_WIFI_CONNECTION_MAXIMUM_RETRY) {
+        BLUFI_INFO("BLUFI WiFi starts reconnection\n");
+        gl_sta_is_connecting = (esp_wifi_connect() == ESP_OK);
+        example_record_wifi_conn_info(EXAMPLE_INVALID_RSSI, EXAMPLE_INVALID_REASON);
+        ret = true;
+    }
+    else {
+        ret = false;
+    }
+    return ret;
+}
+
+/**
+ * @brief 处理重连扫描结果,查找目标WiFi并尝试连接
+ *
+ * @param ap_count 扫描到的AP数量
