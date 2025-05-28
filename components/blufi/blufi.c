@@ -199,3 +199,104 @@ static bool example_wifi_reconnect(void)
  * @brief 处理重连扫描结果,查找目标WiFi并尝试连接
  *
  * @param ap_count 扫描到的AP数量
+ * @param ap_list AP列表
+ */
+static void handle_reconnect_scan_done(uint16_t ap_count, wifi_ap_record_t* ap_list)
+{
+    /* 遍历扫描结果,查找目标SSID */
+    for (int i = 0; i < ap_count; i++) {
+        if (memcmp(ap_list[i].ssid, gl_sta_ssid, gl_sta_ssid_len) == 0) {
+            BLUFI_INFO("Target WiFi '%s' found! RSSI=%d, attempting to connect...\n",
+                       gl_sta_ssid, ap_list[i].rssi);
+
+            /* 找到目标AP,立即尝试连接 */
+            BLUFI_INFO("Calling esp_wifi_connect()...\n");
+
+            /* 先断开当前连接(如果有) */
+            esp_wifi_disconnect();
+            vTaskDelay(pdMS_TO_TICKS(100));  // 等待断开完成
+
+            esp_err_t ret = esp_wifi_connect();
+            BLUFI_INFO("esp_wifi_connect() returned: %s\n", esp_err_to_name(ret));
+
+            if (ret == ESP_OK) {
+                wifi_scan_attempt_count = 0;  // 重置扫描计数
+                wifi_is_scanning_for_reconnect = false;
+
+                /* 停止扫描定时器 */
+                if (wifi_scan_timer != NULL) {
+                    xTimerStop(wifi_scan_timer, 0);
+                    BLUFI_INFO("Stopped scan timer after successful connect initiation\n");
+                }
+            }
+            else {
+                BLUFI_ERROR("Failed to connect to WiFi: %s\n", esp_err_to_name(ret));
+            }
+            return;
+        }
+    }
+
+    /* 未找到目标AP */
+    wifi_scan_attempt_count++;
+    BLUFI_INFO("Target WiFi '%s' not found in scan (attempt %d/%d)\n",
+               gl_sta_ssid, wifi_scan_attempt_count, WIFI_SCAN_MAX_ATTEMPTS);
+
+    /* 检查是否达到最大尝试次数 */
+    if (wifi_scan_attempt_count >= WIFI_SCAN_MAX_ATTEMPTS) {
+        BLUFI_ERROR("WiFi reconnection failed after %d scans, starting BluFi for reconfiguration\n",
+                    wifi_scan_attempt_count);
+
+        /* 停止扫描定时器 */
+        if (wifi_scan_timer != NULL) {
+            xTimerStop(wifi_scan_timer, 0);
+        }
+
+        wifi_scan_attempt_count = 0;
+        wifi_is_scanning_for_reconnect = false;
+
+        /* 重新初始化BluFi,允许用户重新配网 */
+        blufi_reinit();
+    }
+}
+
+/**
+ * @brief WiFi扫描定时器回调函数
+ *
+ * 周期性启动WiFi扫描,查找目标AP
+ *
+ * @param timer 定时器句柄
+ */
+static void wifi_scan_timer_callback(TimerHandle_t timer)
+{
+    /* 仅在未连接且有目标SSID时才扫描 */
+    if (!gl_sta_connected && gl_sta_ssid_len > 0) {
+        BLUFI_INFO("Scanning for target WiFi '%s'... (attempt %d/%d)\n",
+                   gl_sta_ssid, wifi_scan_attempt_count + 1, WIFI_SCAN_MAX_ATTEMPTS);
+
+        wifi_scan_config_t scan_config = {
+            .ssid = gl_sta_ssid,  // 只扫描目标SSID,更快更省电
+            .bssid = NULL,
+            .channel = 0,  // 扫描所有信道
+            .show_hidden = false,
+            .scan_type = WIFI_SCAN_TYPE_ACTIVE,
+            .scan_time.active.min = WIFI_SCAN_ACTIVE_MIN_MS,
+            .scan_time.active.max = WIFI_SCAN_ACTIVE_MAX_MS};
+
+        esp_err_t ret = esp_wifi_scan_start(&scan_config, false);  // 非阻塞扫描
+        if (ret == ESP_OK) {
+            wifi_is_scanning_for_reconnect = true;
+        }
+        else {
+            BLUFI_ERROR("Failed to start WiFi scan: %s\n", esp_err_to_name(ret));
+        }
+    }
+    else if (gl_sta_connected) {
+        /* 如果已经连接,停止定时器 */
+        if (wifi_scan_timer != NULL) {
+            xTimerStop(wifi_scan_timer, 0);
+        }
+        wifi_is_scanning_for_reconnect = false;
+    }
+}
+
+/**
