@@ -300,3 +300,104 @@ static void wifi_scan_timer_callback(TimerHandle_t timer)
 }
 
 /**
+ * @brief 启动WiFi智能重连机制
+ *
+ * 创建并启动周期扫描定时器,通过扫描检测目标WiFi是否可用
+ */
+static void start_wifi_smart_reconnect(void)
+{
+    /* 创建扫描定时器(如果未创建) */
+    if (wifi_scan_timer == NULL) {
+        wifi_scan_timer = xTimerCreate("wifi_scan",
+                                        pdMS_TO_TICKS(WIFI_SCAN_INTERVAL_MS),
+                                        pdTRUE,  // 自动重载
+                                        NULL,
+                                        wifi_scan_timer_callback);
+
+        if (wifi_scan_timer == NULL) {
+            BLUFI_ERROR("Failed to create WiFi scan timer\n");
+            return;
+        }
+    }
+
+    /* 重置扫描状态 */
+    wifi_scan_attempt_count = 0;
+    wifi_is_scanning_for_reconnect = false;
+
+    /* 启动定时器 */
+    if (xTimerStart(wifi_scan_timer, 0) == pdPASS) {
+        BLUFI_INFO("Smart WiFi reconnect started (scan every %d seconds, max %d attempts)\n",
+                   WIFI_SCAN_INTERVAL_MS / 1000, WIFI_SCAN_MAX_ATTEMPTS);
+    }
+    else {
+        BLUFI_ERROR("Failed to start WiFi scan timer\n");
+    }
+}
+
+/**
+ * @brief 停止WiFi智能重连机制
+ */
+static void stop_wifi_smart_reconnect(void)
+{
+    if (wifi_scan_timer != NULL) {
+        xTimerStop(wifi_scan_timer, 0);
+    }
+    wifi_scan_attempt_count = 0;
+    wifi_is_scanning_for_reconnect = false;
+}
+
+static int softap_get_current_connection_number(void)
+{
+    esp_err_t ret;
+    ret = esp_wifi_ap_get_sta_list(&gl_sta_list);
+    if (ret == ESP_OK) {
+        return gl_sta_list.num;
+    }
+
+    return 0;
+}
+
+static void ip_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id,
+                             void* event_data)
+{
+    wifi_mode_t mode;
+
+    switch (event_id) {
+        case IP_EVENT_STA_GOT_IP: {
+            esp_blufi_extra_info_t info;
+
+            xEventGroupSetBits(wifi_event_group, CONNECTED_BIT);
+            mqtt_client_start();
+            esp_wifi_get_mode(&mode);
+
+            memset(&info, 0, sizeof(esp_blufi_extra_info_t));
+            memcpy(info.sta_bssid, gl_sta_bssid, 6);
+            info.sta_bssid_set = true;
+            info.sta_ssid = gl_sta_ssid;
+            info.sta_ssid_len = gl_sta_ssid_len;
+            gl_sta_got_ip = true;
+            if (ble_is_connected == true) {
+                esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_SUCCESS,
+                                                softap_get_current_connection_number(), &info);
+            }
+            else {
+                BLUFI_INFO("BLUFI BLE is not connected yet\n");
+            }
+            vTaskDelay(1000 / portTICK_PERIOD_MS);
+            blufi_deinit();
+            break;
+        }
+        default:
+            break;
+    }
+    return;
+}
+
+static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id,
+                               void* event_data)
+{
+    wifi_event_sta_connected_t* event;
+    wifi_event_sta_disconnected_t* disconnected_event;
+    wifi_mode_t mode;
+
+    switch (event_id) {
