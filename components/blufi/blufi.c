@@ -401,3 +401,104 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
     wifi_mode_t mode;
 
     switch (event_id) {
+        case WIFI_EVENT_STA_START:
+            example_wifi_connect();
+            break;
+        case WIFI_EVENT_STA_CONNECTED:
+            gl_sta_connected = true;
+            gl_sta_is_connecting = false;
+            event = (wifi_event_sta_connected_t*)event_data;
+            memcpy(gl_sta_bssid, event->bssid, 6);
+            memset(gl_sta_ssid, 0, sizeof(gl_sta_ssid));  // 先清零，避免旧数据残留
+            memcpy(gl_sta_ssid, event->ssid, event->ssid_len);
+            gl_sta_ssid_len = event->ssid_len;
+
+            /* WiFi连接成功,停止智能重连 */
+            stop_wifi_smart_reconnect();
+            BLUFI_INFO("WiFi connected successfully to '%s'\n", gl_sta_ssid);
+            break;
+        case WIFI_EVENT_STA_DISCONNECTED:
+            disconnected_event = (wifi_event_sta_disconnected_t*)event_data;
+            BLUFI_INFO("WiFi disconnected, reason=%d\n", disconnected_event->reason);
+
+            /* 区分初次连接和运行期间断线 */
+            if (gl_sta_connected == false) {
+                /* 初次连接阶段,使用快速重连机制 */
+                if (example_wifi_reconnect() == false) {
+                    gl_sta_is_connecting = false;
+                    example_record_wifi_conn_info(disconnected_event->rssi,
+                                                  disconnected_event->reason);
+                }
+            }
+            else {
+                /* 运行期间断线:
+                 * 1. 启动智能重连(周期扫描原WiFi)
+                 * 2. 同时重新开启BluFi(允许用户配置新WiFi)
+                 */
+                BLUFI_INFO("WiFi connection lost, starting smart reconnect and BluFi...\n");
+                start_wifi_smart_reconnect();
+
+                /* 重新初始化BluFi,允许用户配置新的WiFi */
+                blufi_reinit();
+            }
+
+            /* 清除连接状态 */
+            gl_sta_connected = false;
+            gl_sta_got_ip = false;
+            xEventGroupClearBits(wifi_event_group, CONNECTED_BIT);
+            mqtt_client_stop();
+
+            /* 记录断连信息 */
+            example_record_wifi_conn_info(disconnected_event->rssi, disconnected_event->reason);
+            break;
+        case WIFI_EVENT_AP_START:
+            esp_wifi_get_mode(&mode);
+
+            /* TODO: get config or information of softap, then set to report extra_info */
+            if (ble_is_connected == true) {
+                if (gl_sta_connected) {
+                    esp_blufi_extra_info_t info;
+                    memset(&info, 0, sizeof(esp_blufi_extra_info_t));
+                    memcpy(info.sta_bssid, gl_sta_bssid, 6);
+                    info.sta_bssid_set = true;
+                    info.sta_ssid = gl_sta_ssid;
+                    info.sta_ssid_len = gl_sta_ssid_len;
+                    esp_blufi_send_wifi_conn_report(
+                        mode, gl_sta_got_ip ? ESP_BLUFI_STA_CONN_SUCCESS : ESP_BLUFI_STA_NO_IP,
+                        softap_get_current_connection_number(), &info);
+                }
+                else if (gl_sta_is_connecting) {
+                    esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONNECTING,
+                                                    softap_get_current_connection_number(),
+                                                    &gl_sta_conn_info);
+                }
+                else {
+                    esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_FAIL,
+                                                    softap_get_current_connection_number(),
+                                                    &gl_sta_conn_info);
+                }
+            }
+            else {
+                BLUFI_INFO("BLUFI BLE is not connected yet\n");
+            }
+            break;
+        case WIFI_EVENT_SCAN_DONE: {
+            uint16_t apCount = 0;
+            esp_wifi_scan_get_ap_num(&apCount);
+
+            /* 检查是否是智能重连的扫描 */
+            if (wifi_is_scanning_for_reconnect) {
+                /* 先停止扫描,再处理结果 */
+                esp_wifi_scan_stop();
+                wifi_is_scanning_for_reconnect = false;
+
+                /* 处理智能重连扫描结果 */
+                if (apCount > 0) {
+                    wifi_ap_record_t* ap_list =
+                        (wifi_ap_record_t*)malloc(sizeof(wifi_ap_record_t) * apCount);
+                    if (ap_list) {
+                        esp_wifi_scan_get_ap_records(&apCount, ap_list);
+                        handle_reconnect_scan_done(apCount, ap_list);
+                        free(ap_list);
+                    }
+                    else {
