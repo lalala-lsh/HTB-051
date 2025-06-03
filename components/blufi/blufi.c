@@ -602,3 +602,104 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
     /* actually, should post to blufi_task handle the procedure,
      * now, as a example, we do it more simply */
     switch (event) {
+        case ESP_BLUFI_EVENT_INIT_FINISH:
+            BLUFI_INFO("BLUFI init finish\n");
+
+            mine_esp_blufi_adv_start();
+            break;
+        case ESP_BLUFI_EVENT_DEINIT_FINISH:
+            BLUFI_INFO("BLUFI deinit finish\n");
+            break;
+        case ESP_BLUFI_EVENT_BLE_CONNECT:
+            BLUFI_INFO("BLUFI ble connect\n");
+            ble_is_connected = true;
+            esp_blufi_adv_stop();
+            blufi_security_init();
+
+            /* 发送SN码给客户端 */
+            {
+                /* 获取设备SN码 */
+                const char* device_sn = get_device_sn();
+
+                /* 等待连接稳定 */
+                vTaskDelay(pdMS_TO_TICKS(1000));
+
+                /* 计算SN实际长度(最大16字节,去除末尾'\0') */
+                size_t sn_len = strnlen(device_sn, 16);
+
+                /* 发送自定义数据(SN码) */
+                esp_err_t ret = esp_blufi_send_custom_data((uint8_t*)device_sn, sn_len);
+                if (ret == ESP_OK) {
+                    BLUFI_INFO("SN code sent successfully: %.*s (len=%zu)\n", (int)sn_len,
+                               device_sn, sn_len);
+                }
+                else {
+                    BLUFI_ERROR("Failed to send SN code: %s\n", esp_err_to_name(ret));
+                }
+            }
+
+            break;
+        case ESP_BLUFI_EVENT_BLE_DISCONNECT:
+            BLUFI_INFO("BLUFI ble disconnect\n");
+            ble_is_connected = false;
+            // blufi_security_deinit();
+
+            /* 只有在非去初始化状态下才重启广播 */
+            if (!blufi_is_deinitializing) {
+                mine_esp_blufi_adv_start();
+            } else {
+                BLUFI_INFO("Deinitializing, skip restarting advertising\n");
+            }
+            break;
+        case ESP_BLUFI_EVENT_SET_WIFI_OPMODE:
+            BLUFI_INFO("BLUFI Set WIFI opmode %d\n", param->wifi_mode.op_mode);
+            ESP_ERROR_CHECK(esp_wifi_set_mode(param->wifi_mode.op_mode));
+            break;
+        case ESP_BLUFI_EVENT_REQ_CONNECT_TO_AP:
+            BLUFI_INFO("BLUFI requset wifi connect to AP\n");
+            /* there is no wifi callback when the device has already connected to this wifi
+            so disconnect wifi before connection.
+            */
+            esp_wifi_disconnect();
+            example_wifi_connect();
+            break;
+        case ESP_BLUFI_EVENT_REQ_DISCONNECT_FROM_AP:
+            BLUFI_INFO("BLUFI requset wifi disconnect from AP\n");
+            esp_wifi_disconnect();
+            break;
+        case ESP_BLUFI_EVENT_REPORT_ERROR:
+            BLUFI_ERROR("BLUFI report error, error code %d\n", param->report_error.state);
+            esp_blufi_send_error_info(param->report_error.state);
+            break;
+        case ESP_BLUFI_EVENT_GET_WIFI_STATUS: {
+            wifi_mode_t mode;
+            esp_blufi_extra_info_t info;
+
+            esp_wifi_get_mode(&mode);
+
+            if (gl_sta_connected) {
+                memset(&info, 0, sizeof(esp_blufi_extra_info_t));
+                memcpy(info.sta_bssid, gl_sta_bssid, 6);
+                info.sta_bssid_set = true;
+                info.sta_ssid = gl_sta_ssid;
+                info.sta_ssid_len = gl_sta_ssid_len;
+                esp_blufi_send_wifi_conn_report(
+                    mode, gl_sta_got_ip ? ESP_BLUFI_STA_CONN_SUCCESS : ESP_BLUFI_STA_NO_IP,
+                    softap_get_current_connection_number(), &info);
+            }
+            else if (gl_sta_is_connecting) {
+                esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONNECTING,
+                                                softap_get_current_connection_number(),
+                                                &gl_sta_conn_info);
+            }
+            else {
+                esp_blufi_send_wifi_conn_report(mode, ESP_BLUFI_STA_CONN_FAIL,
+                                                softap_get_current_connection_number(),
+                                                &gl_sta_conn_info);
+            }
+            BLUFI_INFO("BLUFI get wifi status from AP\n");
+
+            break;
+        }
+        case ESP_BLUFI_EVENT_RECV_SLAVE_DISCONNECT_BLE:
+            BLUFI_INFO("blufi close a gatt connection");
