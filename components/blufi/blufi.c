@@ -804,3 +804,103 @@ static void example_event_callback(esp_blufi_cb_event_t event, esp_blufi_cb_para
             /* Not handle currently */
             break;
         case ESP_BLUFI_EVENT_RECV_CLIENT_PRIV_KEY:
+            /* Not handle currently */
+            break;
+            ;
+        case ESP_BLUFI_EVENT_RECV_SERVER_PRIV_KEY:
+            /* Not handle currently */
+            break;
+        default:
+            break;
+    }
+}
+
+void blufi_init(void)
+{
+    esp_err_t ret;
+
+    initialise_wifi();
+
+#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
+    ret = esp_blufi_controller_init();
+    if (ret) {
+        BLUFI_ERROR("%s BLUFI controller init failed: %s\n", __func__, esp_err_to_name(ret));
+        return;
+    }
+#endif
+
+    ret = esp_blufi_host_and_cb_init(&example_callbacks);
+    if (ret) {
+        BLUFI_ERROR("%s initialise failed: %s\n", __func__, esp_err_to_name(ret));
+        return;
+    }
+
+    BLUFI_INFO("BLUFI VERSION %04x\n", esp_blufi_get_version());
+}
+
+/**
+ * @brief 反初始化BluFi,关闭所有蓝牙功能,保留WiFi功能
+ *
+ * 该函数按照正确的顺序清理BluFi和蓝牙资源:
+ * 1. 停止BluFi广播
+ * 2. 反初始化BluFi主机协议栈(Bluedroid或NimBLE)
+ * 3. 反初始化蓝牙控制器
+ * 4. 释放蓝牙控制器内存
+ *
+ * @note WiFi功能和事件处理器会被保留,继续正常工作
+ * @return esp_err_t ESP_OK表示成功,其他值表示失败
+ */
+esp_err_t blufi_deinit(void)
+{
+    esp_err_t ret = ESP_OK;
+
+    BLUFI_INFO("Starting BluFi deinitialization...\n");
+
+    /* 设置去初始化标志，防止断开回调中重启广播 */
+    blufi_is_deinitializing = true;
+
+    /* 步骤1: 先停止广播，防止新连接建立 */
+    BLUFI_INFO("Stopping BluFi advertising...\n");
+    esp_blufi_adv_stop();
+    /* 等待广播停止 */
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    /* 步骤2: 如果BLE已连接,断开所有连接 */
+    if (ble_is_connected) {
+        BLUFI_INFO("Disconnecting BLE connection...\n");
+        esp_blufi_disconnect();
+        /* 等待断开事件完成，最多等待3秒 */
+        int wait_count = 0;
+        while (ble_is_connected && wait_count < 30) {
+            vTaskDelay(pdMS_TO_TICKS(100));
+            wait_count++;
+        }
+
+        if (ble_is_connected) {
+            BLUFI_ERROR("BLE disconnect timeout after 3s, force continue...\n");
+            /* 强制重置标志 */
+            ble_is_connected = false;
+        } else {
+            BLUFI_INFO("BLE disconnected successfully\n");
+        }
+    }
+
+    /* 步骤3: 额外延时1秒，确保底层HCI完全断开 */
+    BLUFI_INFO("Waiting for HCI layer cleanup...\n");
+    vTaskDelay(pdMS_TO_TICKS(1000));
+
+    /* 步骤4: 反初始化BluFi host (Bluedroid或NimBLE) */
+    BLUFI_INFO("Deinitializing BluFi host stack...\n");
+    ret = esp_blufi_host_deinit();
+    if (ret != ESP_OK) {
+        BLUFI_ERROR("BluFi host deinit failed: %s\n", esp_err_to_name(ret));
+        /* 继续执行,尝试清理控制器 */
+    }
+    else {
+        BLUFI_INFO("BluFi host deinitialized successfully\n");
+    }
+
+#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
+    /* 步骤5: 反初始化蓝牙控制器 */
+    BLUFI_INFO("Deinitializing BT controller...\n");
+    ret = esp_blufi_controller_deinit();
