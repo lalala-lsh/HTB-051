@@ -904,3 +904,104 @@ esp_err_t blufi_deinit(void)
     /* 步骤5: 反初始化蓝牙控制器 */
     BLUFI_INFO("Deinitializing BT controller...\n");
     ret = esp_blufi_controller_deinit();
+    if (ret != ESP_OK) {
+        BLUFI_ERROR("BT controller deinit failed: %s\n", esp_err_to_name(ret));
+        return ret;
+    }
+    BLUFI_INFO("BT controller deinitialized successfully\n");
+
+    /* 注意: 不释放蓝牙控制器内存,以便后续可以通过blufi_reinit()重新初始化
+     * 如果释放内存,则无法再次初始化BT控制器,只能重启设备
+     */
+#if 0  /* 禁用内存释放,保留重新初始化能力 */
+#if CONFIG_IDF_TARGET_ESP32
+    /* 步骤6: 释放蓝牙控制器内存(ESP32特有) */
+    BLUFI_INFO("Releasing BT controller memory...\n");
+    ret = esp_bt_controller_mem_release(ESP_BT_MODE_BLE);
+    if (ret != ESP_OK) {
+        BLUFI_ERROR("Failed to release BT memory: %s\n", esp_err_to_name(ret));
+        /* 内存释放失败不影响功能,只是无法回收内存 */
+    }
+    else {
+        BLUFI_INFO("BT controller memory released\n");
+    }
+#endif  /* CONFIG_IDF_TARGET_ESP32 */
+#endif  /* 禁用内存释放 */
+#endif  /* CONFIG_BT_CONTROLLER_ENABLED */
+
+    /* 重置全局状态变量 */
+    ble_is_connected = false;
+    gl_sta_is_connecting = false;
+    blufi_is_deinitialized = true;
+
+    BLUFI_INFO("BluFi deinitialization completed successfully\n");
+    BLUFI_INFO("WiFi remains active and functional\n");
+
+    return ESP_OK;
+}
+
+/**
+ * @brief 重新初始化BluFi进行配网
+ *
+ * 该函数用于在blufi_deinit()后重新启动BluFi进行配网。
+ * 执行步骤:
+ * 1. 初始化蓝牙控制器
+ * 2. 初始化BluFi主机协议栈和回调
+ * 3. 启动BluFi广播(由ESP_BLUFI_EVENT_INIT_FINISH回调触发)
+ *
+ * @note 该函数假定WiFi已经初始化(通过blufi_init()或其他方式)
+ * @note 由于blufi_deinit()不释放BT内存,所以可以重新初始化
+ * @return esp_err_t ESP_OK表示成功,其他值表示失败
+ */
+esp_err_t blufi_reinit(void)
+{
+    esp_err_t ret = ESP_OK;
+
+    /* 检查是否需要重新初始化 */
+    if (!blufi_is_deinitialized) {
+        BLUFI_INFO("BluFi is already initialized, skipping reinit\n");
+        return ESP_OK;
+    }
+
+    BLUFI_INFO("Starting BluFi reinitialization...\n");
+
+#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
+    /* 步骤1: 重新初始化蓝牙控制器 */
+    ret = esp_blufi_controller_init();
+    if (ret != ESP_OK) {
+        BLUFI_ERROR("BluFi controller reinit failed: %s\n", esp_err_to_name(ret));
+        return ret;
+    }
+    BLUFI_INFO("BluFi controller reinitialized successfully\n");
+#endif
+
+    /* 步骤2: 初始化BluFi主机协议栈和回调 */
+    BLUFI_INFO("Reinitializing BluFi host stack...\n");
+
+    static esp_blufi_callbacks_t reinit_callbacks = {
+        .event_cb = example_event_callback,
+        .negotiate_data_handler = blufi_dh_negotiate_data_handler,
+        .encrypt_func = blufi_aes_encrypt,
+        .decrypt_func = blufi_aes_decrypt,
+        .checksum_func = blufi_crc_checksum,
+    };
+
+    ret = esp_blufi_host_and_cb_init(&reinit_callbacks);
+    if (ret != ESP_OK) {
+        BLUFI_ERROR("BluFi host and callback init failed: %s\n", esp_err_to_name(ret));
+#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
+        esp_blufi_controller_deinit();
+#endif
+        return ret;
+    }
+    BLUFI_INFO("BluFi host reinitialized successfully\n");
+
+    /* 重置去初始化标志 */
+    blufi_is_deinitialized = false;
+    blufi_is_deinitializing = false;
+
+    BLUFI_INFO("BluFi reinitialization completed successfully\n");
+    BLUFI_INFO("BLUFI VERSION %04x\n", esp_blufi_get_version());
+
+    return ESP_OK;
+}
