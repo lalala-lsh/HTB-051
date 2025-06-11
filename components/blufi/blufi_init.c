@@ -95,3 +95,100 @@ esp_err_t esp_blufi_host_and_cb_init(esp_blufi_callbacks_t *example_callbacks)
 
     ret = esp_blufi_host_init();
     if (ret) {
+        BLUFI_ERROR("%s initialise host failed: %s\n", __func__, esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = esp_blufi_register_callbacks(example_callbacks);
+    if(ret){
+        BLUFI_ERROR("%s blufi register failed, error code = %x\n", __func__, ret);
+        return ret;
+    }
+
+    ret = esp_blufi_gap_register_callback();
+    if(ret){
+        BLUFI_ERROR("%s gap register failed, error code = %x\n", __func__, ret);
+        return ret;
+    }
+
+    return ESP_OK;
+
+}
+
+#endif /* CONFIG_BT_BLUEDROID_ENABLED */
+
+#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
+
+/* 注意: 不再释放经典蓝牙内存,以支持A2DP + BluFi双模共存 */
+
+esp_err_t esp_blufi_controller_init() {
+    esp_err_t ret = ESP_OK;
+
+    /* 使用双模蓝牙(BTDM),同时支持BLE(BluFi)和经典蓝牙(A2DP) */
+    esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+    ret = esp_bt_controller_init(&bt_cfg);
+    if (ret) {
+        BLUFI_ERROR("%s initialize bt controller failed: %s\n", __func__, esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = esp_bt_controller_enable(ESP_BT_MODE_BTDM);
+    if (ret) {
+        BLUFI_ERROR("%s enable bt controller failed: %s\n", __func__, esp_err_to_name(ret));
+        return ret;
+    }
+
+    BLUFI_INFO("BT controller initialized in BTDM mode (BLE + Classic BT)\n");
+    return ret;
+}
+#endif
+
+#if CONFIG_BT_CONTROLLER_ENABLED || !CONFIG_BT_NIMBLE_ENABLED
+esp_err_t esp_blufi_controller_deinit() {
+    esp_err_t ret = ESP_OK;
+    ret = esp_bt_controller_disable();
+    if (ret) {
+        BLUFI_ERROR("%s disable bt controller failed: %s\n", __func__, esp_err_to_name(ret));
+        return ret;
+    }
+
+    ret = esp_bt_controller_deinit();
+    if (ret) {
+        BLUFI_ERROR("%s deinit bt controller failed: %s\n", __func__, esp_err_to_name(ret));
+        return ret;
+    }
+
+    return ret;
+}
+#endif
+
+#ifdef CONFIG_BT_NIMBLE_ENABLED
+void ble_store_config_init(void);
+static void blufi_on_reset(int reason)
+{
+    MODLOG_DFLT(ERROR, "Resetting state; reason=%d\n", reason);
+}
+
+static void
+blufi_on_sync(void)
+{
+  esp_blufi_profile_init();
+}
+
+void bleprph_host_task(void *param)
+{
+    ESP_LOGI("BLUFI_EXAMPLE", "BLE Host Task Started");
+    /* This function will return only when nimble_port_stop() is executed */
+    nimble_port_run();
+
+    nimble_port_freertos_deinit();
+}
+
+esp_err_t esp_blufi_host_init(void)
+{
+    esp_err_t err;
+    err = esp_nimble_init();
+    if (err) {
+        BLUFI_ERROR("%s failed: %s\n", __func__, esp_err_to_name(err));
+        return ESP_FAIL;
+    }
