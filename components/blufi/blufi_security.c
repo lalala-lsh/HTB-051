@@ -112,3 +112,116 @@ void blufi_dh_negotiate_data_handler(uint8_t *data, int len, uint8_t **output_da
         if (ret) {
             BLUFI_ERROR("%s make public failed %d\n", __func__, ret);
             btc_blufi_report_error(ESP_BLUFI_MAKE_PUBLIC_ERROR);
+            return;
+        }
+
+        ret = mbedtls_dhm_calc_secret( &blufi_sec->dhm,
+                blufi_sec->share_key,
+                SHARE_KEY_BIT_LEN,
+                &blufi_sec->share_len,
+                myrand, NULL);
+        if (ret) {
+            BLUFI_ERROR("%s mbedtls_dhm_calc_secret failed %d\n", __func__, ret);
+            btc_blufi_report_error(ESP_BLUFI_DH_PARAM_ERROR);
+            return;
+        }
+
+        ret = mbedtls_md5(blufi_sec->share_key, blufi_sec->share_len, blufi_sec->psk);
+
+        if (ret) {
+            BLUFI_ERROR("%s mbedtls_md5 failed %d\n", __func__, ret);
+            btc_blufi_report_error(ESP_BLUFI_CALC_MD5_ERROR);
+            return;
+        }
+
+        mbedtls_aes_setkey_enc(&blufi_sec->aes, blufi_sec->psk, 128);
+
+        /* alloc output data */
+        *output_data = &blufi_sec->self_public_key[0];
+        *output_len = dhm_len;
+        *need_free = false;
+
+    }
+        break;
+    case SEC_TYPE_DH_P:
+        break;
+    case SEC_TYPE_DH_G:
+        break;
+    case SEC_TYPE_DH_PUBLIC:
+        break;
+    }
+}
+
+int blufi_aes_encrypt(uint8_t iv8, uint8_t *crypt_data, int crypt_len)
+{
+    int ret;
+    size_t iv_offset = 0;
+    uint8_t iv0[16];
+
+    memcpy(iv0, blufi_sec->iv, sizeof(blufi_sec->iv));
+    iv0[0] = iv8;   /* set iv8 as the iv0[0] */
+
+    ret = mbedtls_aes_crypt_cfb128(&blufi_sec->aes, MBEDTLS_AES_ENCRYPT, crypt_len, &iv_offset, iv0, crypt_data, crypt_data);
+    if (ret) {
+        return -1;
+    }
+
+    return crypt_len;
+}
+
+int blufi_aes_decrypt(uint8_t iv8, uint8_t *crypt_data, int crypt_len)
+{
+    int ret;
+    size_t iv_offset = 0;
+    uint8_t iv0[16];
+
+    memcpy(iv0, blufi_sec->iv, sizeof(blufi_sec->iv));
+    iv0[0] = iv8;   /* set iv8 as the iv0[0] */
+
+    ret = mbedtls_aes_crypt_cfb128(&blufi_sec->aes, MBEDTLS_AES_DECRYPT, crypt_len, &iv_offset, iv0, crypt_data, crypt_data);
+    if (ret) {
+        return -1;
+    }
+
+    return crypt_len;
+}
+
+uint16_t blufi_crc_checksum(uint8_t iv8, uint8_t *data, int len)
+{
+    /* This iv8 ignore, not used */
+    return esp_crc16_be(0, data, len);
+}
+
+esp_err_t blufi_security_init(void)
+{
+    blufi_sec = (struct blufi_security *)malloc(sizeof(struct blufi_security));
+    if (blufi_sec == NULL) {
+        return ESP_FAIL;
+    }
+
+    memset(blufi_sec, 0x0, sizeof(struct blufi_security));
+
+    mbedtls_dhm_init(&blufi_sec->dhm);
+    mbedtls_aes_init(&blufi_sec->aes);
+
+    memset(blufi_sec->iv, 0x0, 16);
+    return 0;
+}
+
+void blufi_security_deinit(void)
+{
+    if (blufi_sec == NULL) {
+        return;
+    }
+    if (blufi_sec->dh_param){
+        free(blufi_sec->dh_param);
+        blufi_sec->dh_param = NULL;
+    }
+    mbedtls_dhm_free(&blufi_sec->dhm);
+    mbedtls_aes_free(&blufi_sec->aes);
+
+    memset(blufi_sec, 0x0, sizeof(struct blufi_security));
+
+    free(blufi_sec);
+    blufi_sec =  NULL;
+}
