@@ -82,3 +82,88 @@ esp_err_t system_info_init(void)
     // init mac
     uint8_t mac[6];
     ret = esp_read_mac(mac, ESP_MAC_BASE);
+    snprintf(system_info.mac_addr, sizeof(system_info.mac_addr), "%02X:%02X:%02X:%02X:%02X:%02X", mac[0], mac[1],
+             mac[2], mac[3], mac[4], mac[5]);
+
+    // init device name
+    // CONFIG_EXAMPLE_DEFAULT_DEVICE_NAME + '-' + mac[4] [5]
+    snprintf(system_info.device_name, sizeof(system_info.device_name), "%s-%02X%02X",
+             CONFIG_EXAMPLE_DEFAULT_DEVICE_NAME, mac[4], mac[5]);
+    return ESP_OK;
+}
+
+const system_info_t* get_system_info(void)
+{
+    return &system_info;
+}
+
+const char* get_device_name(void)
+{
+    return system_info.device_name;
+}
+
+const char* get_device_sn(void)
+{
+    return system_info.sn;
+}
+
+const char* get_device_mac(void)
+{
+    return system_info.mac_addr;
+}
+
+const char* get_firmware_version(void)
+{
+    return system_info.version;
+}
+
+void print_system_info(void) 
+{
+    ESP_LOGI(TAG, "==================== 系统信息 =====================");
+    ESP_LOGI(TAG, "║ 固件版本: %-37s ║", system_info.version);
+    ESP_LOGI(TAG, "║ 设备名称: %-37s ║", system_info.device_name);
+    ESP_LOGI(TAG, "║ MAC地址:  %-37s ║", system_info.mac_addr);
+    ESP_LOGI(TAG, "║ SN码:     %-37s ║", system_info.sn);
+    ESP_LOGI(TAG, "===================================================");
+}
+
+void print_heap_stats(void) 
+{
+    int free_sram = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    int min_free_sram = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
+    ESP_LOGI(TAG, "free sram: %u minimal sram: %u", free_sram, min_free_sram);
+}
+
+esp_err_t set_system_sncode(const uint8_t *sn_code)
+{
+    if (sn_code == NULL) {
+        ESP_LOGE(TAG, "SN码指针为空");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 将二进制SN转换为字符串
+    char sn_str[17] = {0};
+    memcpy(sn_str, sn_code, 16);
+    sn_str[16] = '\0';
+
+    // 使用settings模块写入NVS
+    settings_t *settings = settings_start("SNCode_NVS", true);  // 读写模式,命名空间: system_info
+    if (settings == NULL) {
+        ESP_LOGE(TAG, "打开NVS失败");
+        return ESP_FAIL;
+    }
+
+    settings_set_string(settings, "SNCode", sn_str);  // 键: SNCode
+    esp_err_t ret = settings_end(settings);  // 自动提交
+
+    if (ret == ESP_OK) {
+        // 同步更新内存中的SN码
+        strncpy(system_info.sn, sn_str, sizeof(system_info.sn) - 1);
+        system_info.sn[sizeof(system_info.sn) - 1] = '\0';
+        ESP_LOGI(TAG, "SN码写入成功: %s", sn_str);
+    } else {
+        ESP_LOGE(TAG, "SN码写入失败: %s", esp_err_to_name(ret));
+    }
+
+    return ret;
+}
