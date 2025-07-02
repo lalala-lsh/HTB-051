@@ -200,3 +200,105 @@ device_params_t* get_device_params(void)
 
 uint8_t device_params_get_up_light_state(void)
 {
+    return dev_params.up_light_state;
+}
+
+uint8_t device_params_get_lower_light_state(void)
+{
+    return dev_params.lower_light_state;
+}
+
+uint8_t device_params_get_ambient_light_state(void)
+{
+    return dev_params.ambient_light_state;
+}
+
+uint8_t device_params_get_up_light_brightness(void)
+{
+    return dev_params.up_light_brightness;
+}
+
+uint8_t device_params_get_lower_light_brightness(void)
+{
+    return dev_params.lower_light_brightness;
+}
+
+uint8_t device_params_get_ambient_light_brightness(void)
+{
+    return dev_params.ambient_light_brightness;
+}
+
+therapy_state_t device_params_get_therapy_state(void)
+{
+    return dev_params.therapy_state;
+}
+
+uint8_t device_params_get_therapy_bright(int index)
+{
+    if (index >= 0 && index < 3) {
+        return dev_params.therapy_bright[index];
+    }
+    return 0;
+}
+
+uint8_t device_params_get_music_state(void)
+{
+    return dev_params.music_state;
+}
+
+uint8_t device_params_get_voice_state(void)
+{
+    return dev_params.voice_state;
+}
+
+uint8_t device_params_get_music_volume(void)
+{
+    return dev_params.music_volume;
+}
+
+uint8_t device_params_get_therapy_focus_state(void)
+{
+    return dev_params.therapy_focus_state;
+}
+
+uint8_t device_params_get_therapy_sleep_state(void)
+{
+    return dev_params.therapy_sleep_state;
+}
+
+uint8_t device_params_get_therapy_sleep_duration(void)
+{
+    return dev_params.therapy_sleep_duration;
+}
+
+uint8_t device_params_get_focus_source(void)
+{
+    return dev_params.focus_source;
+}
+
+uint8_t device_params_get_constant_light_state(void)
+{
+    return dev_params.constant_light_state;
+}
+
+uint8_t device_params_get_pir_state(void)
+{
+    return dev_params.pir_state;
+}
+
+uint8_t device_params_get_dim_timeout(void)
+{
+    return dev_params.dim_timeout;
+}
+
+uint8_t device_params_get_off_timeout(void)
+{
+    return dev_params.off_timeout;
+}
+
+/* ============ Setter 函数实现 ============ */
+
+void device_params_set_music_state(uint8_t state)
+{
+    dev_params.music_state = state;
+
