@@ -302,3 +302,104 @@ void device_params_set_music_state(uint8_t state)
 {
     dev_params.music_state = state;
 
+    /* 保存到NVS */
+    settings_t* nvs = settings_start("device_params", true);
+    if (nvs) {
+        settings_set_int(nvs, "music_state", state);
+        settings_end(nvs);
+    }
+
+    /* 实时应用到运行时 */
+    audio_queue_set_music_enabled(state == 1);
+
+    /* 开启时检查红光模式和PIR状态 */
+    if (state == 1) {
+        light_manager_t* mgr = get_light_manager();
+        if (mgr != NULL) {
+            red_light_mode_t red_mode = light_manager_get_red_mode(mgr);
+
+            // 检查PIR调暗状态
+            bool is_pir_dimmed = sensor_control_is_pir_dimmed();
+
+            if (red_mode == RED_LIGHT_MODE_NORMAL && !is_pir_dimmed) {
+                // 音乐开关只控制护眼模式背景音乐
+                ESP_LOGI(TAG, "检测到红光模式(%d)且非PIR调暗,启动背景音乐", red_mode);
+                audio_queue_set_background_music(MUSIC, true);
+                audio_queue_play_loop(MUSIC, AUDIO_TYPE_MUSIC_CTRL, AUDIO_PRIORITY_LOW);
+            }
+            else if (is_pir_dimmed) {
+                ESP_LOGI(TAG, "PIR调暗期间,暂不启动音乐(检测到运动后自动恢复)");
+            }
+        }
+    }
+
+    ESP_LOGI(TAG, "music_state已设置为%d", state);
+}
+
+void device_params_set_voice_state(uint8_t state)
+{
+    dev_params.voice_state = state;
+
+    /* 保存到NVS */
+    settings_t* nvs = settings_start("device_params", true);
+    if (nvs) {
+        settings_set_int(nvs, "voice_state", state);
+        settings_end(nvs);
+    }
+
+    /* 实时应用到运行时 */
+    audio_queue_set_voice_enabled(state == 1);
+    ESP_LOGI(TAG, "voice_state已设置为%d", state);
+}
+
+void device_params_set_music_volume(uint8_t volume)
+{
+    if (volume < 1 || volume > 5) {
+        ESP_LOGW(TAG, "音量超出范围(1-5): %d", volume);
+        return;
+    }
+
+    dev_params.music_volume = volume;
+
+    /* 保存到NVS */
+    settings_t* nvs = settings_start("device_params", true);
+    if (nvs) {
+        settings_set_int(nvs, "music_vol", volume);
+        settings_end(nvs);
+    }
+
+    /* 实时应用到运行时: 协议1-5档 → 硬件80-100映射 */
+    int hw_vol = volume * 5 + 75;
+    mp3_player_set_volume(hw_vol);
+    ESP_LOGI(TAG, "music_volume已设置为%d(硬件音量%d)", volume, hw_vol);
+}
+
+void device_params_set_constant_light_state(uint8_t state)
+{
+    dev_params.constant_light_state = state;
+
+    /* 保存到NVS */
+    settings_t* nvs = settings_start("device_params", true);
+    if (nvs) {
+        settings_set_int(nvs, "const_light", state);
+        settings_end(nvs);
+    }
+
+    /* 下次灯光开启时生效 */
+    constant_light_set_enabled(state == 1);
+    ESP_LOGI(TAG, "constant_light_state已设置为%d(下次灯光开启时生效)", state);
+}
+
+void device_params_set_pir_state(uint8_t state)
+{
+    dev_params.pir_state = state;
+
+    /* 保存到NVS */
+    settings_t* nvs = settings_start("device_params", true);
+    if (nvs) {
+        settings_set_int(nvs, "pir_state", state);
+        settings_end(nvs);
+    }
+
+    /* 下次灯光开启时生效 */
+    sensor_control_set_pir_enabled(state == 1);
