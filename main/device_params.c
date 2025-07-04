@@ -403,3 +403,104 @@ void device_params_set_pir_state(uint8_t state)
 
     /* 下次灯光开启时生效 */
     sensor_control_set_pir_enabled(state == 1);
+    ESP_LOGI(TAG, "pir_state已设置为%d(下次灯光开启时生效)", state);
+}
+
+void device_params_set_dim_timeout(uint8_t minutes)
+{
+    if (minutes < 1 || minutes > 45) {
+        ESP_LOGW(TAG, "dim_timeout超出范围(1-45): %d", minutes);
+        return;
+    }
+
+    dev_params.dim_timeout = minutes;
+
+    /* 保存到NVS */
+    settings_t* nvs = settings_start("device_params", true);
+    if (nvs) {
+        settings_set_int(nvs, "dim_timeout", minutes);
+        settings_end(nvs);
+    }
+
+    /* 实时应用到运行时 */
+    sensor_control_set_dim_timeout(minutes);
+    ESP_LOGI(TAG, "dim_timeout已设置为%d分钟", minutes);
+}
+
+void device_params_set_off_timeout(uint8_t minutes)
+{
+    if (minutes < 1 || minutes > 10) {
+        ESP_LOGW(TAG, "off_timeout超出范围(1-10): %d", minutes);
+        return;
+    }
+
+    dev_params.off_timeout = minutes;
+
+    /* 保存到NVS */
+    settings_t* nvs = settings_start("device_params", true);
+    if (nvs) {
+        settings_set_int(nvs, "off_timeout", minutes);
+        settings_end(nvs);
+    }
+
+    /* 实时应用到运行时 */
+    sensor_control_set_off_timeout(minutes);
+    ESP_LOGI(TAG, "off_timeout已设置为%d分钟", minutes);
+}
+
+void device_params_set_therapy_focus_state(uint8_t state)
+{
+    dev_params.therapy_focus_state = (state == 1) ? 1 : 0;
+
+    settings_t* nvs = settings_start("device_params", true);
+    if (nvs) {
+        settings_set_int(nvs, "focus_state", dev_params.therapy_focus_state);
+        settings_end(nvs);
+    }
+
+    ESP_LOGI(TAG, "therapy_focus_state已设置为%d", dev_params.therapy_focus_state);
+}
+
+void device_params_set_therapy_sleep_state(uint8_t state)
+{
+    dev_params.therapy_sleep_state = (state == 1) ? 1 : 0;
+
+    settings_t* nvs = settings_start("device_params", true);
+    if (nvs) {
+        settings_set_int(nvs, "sleep_state", dev_params.therapy_sleep_state);
+        settings_end(nvs);
+    }
+
+    ESP_LOGI(TAG, "therapy_sleep_state已设置为%d", dev_params.therapy_sleep_state);
+}
+
+void device_params_set_therapy_sleep_duration(uint8_t minutes)
+{
+    if (minutes < 10 || minutes > 60 || (minutes % 10 != 0)) {
+        ESP_LOGW(TAG, "sleep_duration超出范围(10-60,步进10): %d", minutes);
+        return;
+    }
+
+    dev_params.therapy_sleep_duration = minutes;
+
+    settings_t* nvs = settings_start("device_params", true);
+    if (nvs) {
+        settings_set_int(nvs, "sleep_dur", minutes);
+        settings_end(nvs);
+    }
+
+    ESP_LOGI(TAG, "therapy_sleep_duration已设置为%d分钟", minutes);
+}
+
+void device_params_set_focus_source(uint8_t source)
+{
+    dev_params.focus_source = (source == FOCUS_SOURCE_BUZZER) ? FOCUS_SOURCE_BUZZER : FOCUS_SOURCE_AUDIO;
+
+    settings_t* nvs = settings_start("device_params", true);
+    if (nvs) {
+        settings_set_int(nvs, "focus_source", dev_params.focus_source);
+        settings_end(nvs);
+    }
+
+    ESP_LOGI(TAG, "focus_source已设置为%d", dev_params.focus_source);
+}
