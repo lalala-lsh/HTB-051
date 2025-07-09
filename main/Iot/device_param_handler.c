@@ -103,3 +103,108 @@ static bool handle_volume(const char* key, cJSON* value)
 /* ========================================================================== */
 /* therapy_focus_state 参数处理                                                */
 /* ========================================================================== */
+
+static bool handle_therapy_focus_state(const char* key, cJSON* value)
+{
+    int val = cJSON_IsNumber(value) ? value->valueint : -1;
+
+    if (val == 0 || val == 1) {
+        device_params_set_therapy_focus_state((uint8_t)val);
+        ESP_LOGI(TAG, "设置therapy_focus_state=%d", val);
+        return true;
+    }
+
+    ESP_LOGW(TAG, "therapy_focus_state值无效: %d", val);
+    return false;
+}
+
+/* ========================================================================== */
+/* therapy_sleep_state 参数处理                                                */
+/* ========================================================================== */
+
+static bool handle_therapy_sleep_state(const char* key, cJSON* value)
+{
+    int val = cJSON_IsNumber(value) ? value->valueint : -1;
+
+    if (val == 0 || val == 1) {
+        device_params_set_therapy_sleep_state((uint8_t)val);
+        ESP_LOGI(TAG, "设置therapy_sleep_state=%d", val);
+        return true;
+    }
+
+    ESP_LOGW(TAG, "therapy_sleep_state值无效: %d", val);
+    return false;
+}
+
+/* ========================================================================== */
+/* therapy_sleep_duration 参数处理                                             */
+/* ========================================================================== */
+
+static bool handle_therapy_sleep_duration(const char* key, cJSON* value)
+{
+    int val = cJSON_IsNumber(value) ? value->valueint : -1;
+
+    if (val >= 10 && val <= 60 && (val % 10 == 0)) {
+        device_params_set_therapy_sleep_duration((uint8_t)val);
+        ESP_LOGI(TAG, "设置therapy_sleep_duration=%d", val);
+        return true;
+    }
+
+    ESP_LOGW(TAG, "therapy_sleep_duration值无效(10-60,步进10): %d", val);
+    return false;
+}
+
+/* ========================================================================== */
+/* 初始化                                                                      */
+/* ========================================================================== */
+
+esp_err_t device_param_handler_init(void)
+{
+    esp_err_t ret;
+
+    ret = param_handler_register("music_state", handle_music_state);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "注册music_state处理器失败");
+        return ret;
+    }
+
+    ret = param_handler_register("voice_state", handle_voice_state);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "注册voice_state处理器失败");
+        return ret;
+    }
+
+    ret = param_handler_register("constant_light_state", handle_constant_light_state);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "注册constant_light_state处理器失败");
+        return ret;
+    }
+
+    ret = param_handler_register("volume", handle_volume);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "注册volume处理器失败");
+        return ret;
+    }
+
+    ret = param_handler_register("therapy_focus_state", handle_therapy_focus_state);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "注册therapy_focus_state处理器失败");
+        return ret;
+    }
+
+    ret = param_handler_register("therapy_sleep_state", handle_therapy_sleep_state);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "注册therapy_sleep_state处理器失败");
+        return ret;
+    }
+
+    ret = param_handler_register("therapy_sleep_duration", handle_therapy_sleep_duration);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "注册therapy_sleep_duration处理器失败");
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "设备参数处理器初始化完成");
+    return ESP_OK;
+}
+
