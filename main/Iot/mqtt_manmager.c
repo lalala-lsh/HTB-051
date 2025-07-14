@@ -88,3 +88,94 @@ static void create_mqtt_topic(mqtt_client_config_t* manager)
 
     unsigned char hash_value[16];
     hash(hash_value, (unsigned char*)device_mac, strlen(device_mac), MBEDTLS_MD_MD5);
+    unsigned int result = mod(hash_value, 2);
+
+    // 构建发布和订阅主题
+    snprintf(manager->publish_topic, sizeof(manager->publish_topic), "%s%u/%s/htb_pub",
+             MQTT_CONFIG_TOPIC_PREFIX, result, device_sn);
+
+    snprintf(manager->subscribe_topic, sizeof(manager->subscribe_topic), "%s%s/htb_sub",
+             MQTT_CONFIG_TOPIC_PREFIX, device_sn);
+}
+
+mqtt_client_config_t* mqtt_client_create(void)
+{
+    mqtt_client_config_t* manager =
+        (mqtt_client_config_t*)heap_caps_calloc(1, sizeof(mqtt_client_config_t), MALLOC_CAP_SPIRAM);
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for mqtt_client_config");
+        return NULL;
+    }
+
+    // 创建MQTT主题
+    create_mqtt_topic(manager);
+
+    // 获取设备SN
+    const char* device_sn = get_device_sn();
+
+    // 动态分配client_id内存
+    size_t client_id_len = strlen("htb-") + strlen(device_sn) + 1;
+    manager->mqtt_cfg.credentials.client_id =
+        (char*)heap_caps_calloc(1, client_id_len, MALLOC_CAP_SPIRAM);
+    if (manager->mqtt_cfg.credentials.client_id == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate memory for client_id");
+        heap_caps_free(manager);
+        return NULL;
+    }
+    snprintf(manager->mqtt_cfg.credentials.client_id, client_id_len, "htb-%s", device_sn);
+
+    manager->mqtt_cfg.broker.address.uri = MQTT_CONFIG_BROKER_URL;
+    manager->mqtt_cfg.credentials.username = MQTT_CONFIG_USERNAME;
+    manager->mqtt_cfg.credentials.authentication.password = MQTT_CONFIG_PASSWORD;
+
+    // 构建遗嘱消息
+    char* will_msg = build_will_message();
+    if (!will_msg) {
+        ESP_LOGE(TAG, "创建遗嘱消息失败");
+        return NULL;
+    }
+
+    manager->mqtt_cfg.session.last_will.topic = manager->publish_topic;
+    manager->mqtt_cfg.session.last_will.msg = will_msg;
+    manager->mqtt_cfg.session.last_will.msg_len = strlen(will_msg);
+    manager->mqtt_cfg.session.last_will.qos = MQTT_LWT_QOS;
+    manager->mqtt_cfg.session.last_will.retain = MQTT_LWT_RETAIN;
+    manager->mqtt_cfg.session.keepalive = 120;
+
+    return manager;
+}
+
+/**
+ * @brief 心跳包发送任务
+ */
+static void heartbeat_task(void* pvParameters)
+{
+    const TickType_t heartbeat_delay = pdMS_TO_TICKS(MQTT_HEARTBEAT_INTERVAL);
+
+    while (1) {
+        if (mqtt_client != NULL) {
+
+            // 构建并发送心跳包
+            char* heartbeat_msg = build_heartbeat_message();
+            // 打印心跳包内容
+            ESP_LOGI(TAG, "心跳包内容: %s", heartbeat_msg);
+            if (heartbeat_msg) {
+                esp_mqtt_client_publish(mqtt_client, mqtt_client_cfg->publish_topic, heartbeat_msg,
+                                        0, MQTT_QOS, 0);
+                free(heartbeat_msg);
+            }
+            else {
+                ESP_LOGE(TAG, "构建心跳消息失败");
+            }
+        }
+        else {
+            ESP_LOGW(TAG, "MQTT未连接，跳过心跳");
+        }
+
+        // 延时
+        vTaskDelay(heartbeat_delay);
+    }
+}
+
+static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_t event_id,
+                               void* event_data)
