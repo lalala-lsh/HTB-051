@@ -179,3 +179,93 @@ static void heartbeat_task(void* pvParameters)
 
 static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_t event_id,
                                void* event_data)
+{
+    esp_mqtt_event_handle_t event = event_data;
+
+    switch (event->event_id) {
+        case MQTT_EVENT_CONNECTED:
+            mqtt_state = MQTT_STATE_CONNECTED;
+
+            ESP_LOGI(TAG, "MQTT连接成功");
+
+            // 订阅主题
+            esp_mqtt_client_subscribe(event->client, mqtt_client_cfg->subscribe_topic, MQTT_QOS);
+
+            sntp_wait_sync(portMAX_DELAY);
+
+            char* boot_sync_msg = build_boot_sync_message();
+            if (boot_sync_msg) {
+                // 打印开机同步消息内容
+                ESP_LOGI(TAG, "开机同步消息内容: %s", boot_sync_msg);
+                esp_mqtt_client_publish(event->client, mqtt_client_cfg->publish_topic,
+                                        boot_sync_msg, 0, MQTT_QOS, 0);
+                free(boot_sync_msg);
+            }
+            else {
+                ESP_LOGE(TAG, "构建开机同步消息失败");
+            }
+
+            if (heartbeat_task_handle == NULL) {
+                xTaskCreate(heartbeat_task,          // 任务函数
+                            "heartbeat_task",        // 任务名称
+                            4096,                    // 任务堆栈大小
+                            NULL,                    // 任务参数
+                            5,                       // 任务优先级
+                            &heartbeat_task_handle); // 任务句柄
+            }
+            break;
+
+        case MQTT_EVENT_DISCONNECTED:
+            mqtt_state = MQTT_STATE_DISCONNECTED;
+            ESP_LOGI(TAG, "MQTT断开连接, msg_id=%d", event->msg_id);
+            break;
+
+        case MQTT_EVENT_SUBSCRIBED:
+            ESP_LOGD(TAG, "MQTT订阅成功, msg_id=%d", event->msg_id);
+            break;
+
+        case MQTT_EVENT_UNSUBSCRIBED:
+            mqtt_state = MQTT_STATE_UNSUBSCRIBED;
+            ESP_LOGD(TAG, "MQTT取消订阅, msg_id=%d", event->msg_id);
+            break;
+
+        case MQTT_EVENT_PUBLISHED:
+            ESP_LOGD(TAG, "MQTT发布成功, msg_id=%d", event->msg_id);
+            break;
+
+        case MQTT_EVENT_DATA:
+            // ESP_LOGI(TAG, "MQTT收到数据, topic=%.*s", event->topic_len, event->topic);
+
+            // 安全地处理接收到的数据
+            if (event->data_len > 0) {
+                // 打印接收到的数据（使用长度限制，因为 event->data 不是 null 结尾）
+                ESP_LOGI(TAG, "接收到的数据: %.*s", event->data_len, event->data);
+
+                // 处理收到的消息（直接传递指针和长度，避免内存分配）
+                process_received_message(event->client, event->data, event->data_len);
+            }
+
+            // 这里不再需要获取信号量，因为我们已经在上面释放了
+            return;
+
+        case MQTT_EVENT_ERROR:
+            mqtt_state = MQTT_STATE_ERROR;
+            ESP_LOGE(TAG, "MQTT错误，类型=%d", event->error_handle->error_type);
+
+            // 根据错误类型提供更详细的信息
+            switch (event->error_handle->error_type) {
+                case MQTT_ERROR_TYPE_TCP_TRANSPORT:
+                    ESP_LOGE(TAG, "传输错误: %d", event->error_handle->esp_transport_sock_errno);
+                    break;
+                default:
+                    ESP_LOGE(TAG, "未知错误");
+                    break;
+            }
+            break;
+
+        case MQTT_EVENT_BEFORE_CONNECT:
+            mqtt_state = MQTT_STATE_BEFORE_CONNECT;
+            ESP_LOGI(TAG, "MQTT准备连接");
+            break;
+
+        default:
