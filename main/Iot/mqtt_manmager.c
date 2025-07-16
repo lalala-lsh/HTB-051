@@ -269,3 +269,93 @@ static void mqtt_event_handler(void* handler_args, esp_event_base_t base, int32_
             break;
 
         default:
+            ESP_LOGI(TAG, "其他MQTT事件: %d", event->event_id);
+            break;
+    }
+}
+
+void mqtt_client_init(void)
+{
+    mqtt_client_cfg = mqtt_client_create();
+
+    // 创建MQTT客户端
+    mqtt_client = esp_mqtt_client_init(&mqtt_client_cfg->mqtt_cfg);
+    if (mqtt_client == NULL) {
+        ESP_LOGE(TAG, "MQTT客户端初始化失败");
+        return;
+    }
+
+    // 创建事件组
+    mqtt_event_group = xEventGroupCreate();
+    if (mqtt_event_group == NULL) {
+        ESP_LOGE(TAG, "创建MQTT事件组失败");
+        return;
+    }
+
+    // 创建灯光同步任务
+    BaseType_t ret =
+        xTaskCreate(light_sync_task, "light_sync", 4096, NULL, 5, &light_sync_task_handle);
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "创建灯光同步任务失败");
+    }
+
+    // 创建每日版本同步任务
+    ret = xTaskCreate(daily_sync_task, "daily_sync", 4096, NULL, 4, &daily_sync_task_handle);
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "创建每日同步任务失败");
+    }
+
+    // 注册事件处理
+    esp_mqtt_client_register_event(mqtt_client, ESP_EVENT_ANY_ID, mqtt_event_handler, NULL);
+}
+
+esp_err_t mqtt_client_start(void)
+{
+    if (mqtt_client == NULL) {
+        ESP_LOGE(TAG, "MQTT客户端未初始化");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 开始MQTT客户端
+    esp_err_t err = esp_mqtt_client_start(mqtt_client);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "启动MQTT客户端失败: %s", esp_err_to_name(err));
+    }
+    return err;
+}
+
+esp_err_t mqtt_client_stop(void)
+{
+    if (mqtt_client == NULL) {
+        ESP_LOGW(TAG, "MQTT客户端未初始化或已停止");
+        return ESP_OK;
+    }
+
+    // 只停止客户端，不销毁（这样可以再次start）
+    esp_err_t err = esp_mqtt_client_stop(mqtt_client);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "停止MQTT客户端失败: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    mqtt_state = MQTT_STATE_IDLE;
+    return ESP_OK;
+}
+
+mqtt_state_t mqtt_client_get_state(void)
+{
+    return mqtt_state;
+}
+
+const char* mqtt_client_get_subscribe_topic(void)
+{
+    if (mqtt_client_cfg == NULL) {
+        return NULL;
+    }
+    return mqtt_client_cfg->subscribe_topic;
+}
+
+const char* mqtt_client_get_publish_topic(void)
+{
+    if (mqtt_client_cfg == NULL) {
+        return NULL;
