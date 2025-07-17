@@ -359,3 +359,94 @@ const char* mqtt_client_get_publish_topic(void)
 {
     if (mqtt_client_cfg == NULL) {
         return NULL;
+    }
+    return mqtt_client_cfg->publish_topic;
+}
+
+/**
+ * @brief 灯光同步任务
+ * @note 等待事件 -> 防抖 -> 发送同步消息
+ */
+static void light_sync_task(void* pvParameters)
+{
+    while (1) {
+        // 等待灯光变化事件
+        EventBits_t bits =
+            xEventGroupWaitBits(mqtt_event_group, LIGHT_SYNC_BIT, pdTRUE, pdFALSE, portMAX_DELAY);
+
+        if (bits & LIGHT_SYNC_BIT) {
+            // 防抖：等待500ms，如果期间有新事件则重新计时
+            while (1) {
+                EventBits_t debounce_bits =
+                    xEventGroupWaitBits(mqtt_event_group, LIGHT_SYNC_BIT, pdTRUE, pdFALSE,
+                                        pdMS_TO_TICKS(LIGHT_SYNC_DEBOUNCE_MS));
+
+                if (!(debounce_bits & LIGHT_SYNC_BIT)) {
+                    // 超时无新事件，可以发送了
+                    break;
+                }
+                // 有新事件，继续等待
+            }
+
+            // 检查MQTT是否已连接
+            if (mqtt_state != MQTT_STATE_CONNECTED || mqtt_client == NULL) {
+                ESP_LOGW(TAG, "MQTT未连接，丢弃灯光同步");
+                continue;
+            }
+
+            // 构建并发送同步消息
+            char* sync_msg = build_params_sync_message();
+            if (sync_msg) {
+                ESP_LOGD(TAG, "灯光同步消息: %s", sync_msg);
+                esp_mqtt_client_publish(mqtt_client, mqtt_client_cfg->publish_topic, sync_msg, 0,
+                                        MQTT_QOS, 0);
+                free(sync_msg);
+            }
+            else {
+                ESP_LOGE(TAG, "构建灯光同步消息失败");
+            }
+        }
+    }
+}
+
+void mqtt_notify_light_change(void)
+{
+    if (mqtt_event_group != NULL) {
+        xEventGroupSetBits(mqtt_event_group, LIGHT_SYNC_BIT);
+    }
+}
+
+/**
+ * @brief 计算距离下一个同步时间点的秒数
+ * @param now 当前时间的tm结构
+ * @param random_offset 在时间窗口内的随机偏移（秒）
+ * @return 距离下一个同步时间点的秒数
+ */
+static uint32_t calculate_seconds_until_sync(struct tm* now, uint32_t random_offset)
+{
+    // 计算今天同步时间点的秒数（从0点开始）
+    uint32_t sync_time_today = DAILY_SYNC_START_HOUR * 3600 + random_offset;
+
+    // 计算当前时间的秒数（从0点开始）
+    uint32_t current_seconds = now->tm_hour * 3600 + now->tm_min * 60 + now->tm_sec;
+
+    if (current_seconds < sync_time_today) {
+        // 今天的同步时间还没到
+        return sync_time_today - current_seconds;
+    }
+    else {
+        // 今天的同步时间已过，等待明天
+        return (24 * 3600 - current_seconds) + sync_time_today;
+    }
+}
+
+/**
+ * @brief 每日版本同步任务
+ * @note 在7:00-9:00之间随机时间上报版本信息，减轻服务器压力
+ */
+static void daily_sync_task(void* pvParameters)
+{
+    // 等待SNTP时间同步完成
+    ESP_LOGI(TAG, "每日同步任务：等待SNTP时间同步...");
+    sntp_wait_sync(portMAX_DELAY);
+    ESP_LOGI(TAG, "每日同步任务：SNTP时间同步完成");
