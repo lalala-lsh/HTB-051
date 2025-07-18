@@ -450,3 +450,93 @@ static void daily_sync_task(void* pvParameters)
     ESP_LOGI(TAG, "每日同步任务：等待SNTP时间同步...");
     sntp_wait_sync(portMAX_DELAY);
     ESP_LOGI(TAG, "每日同步任务：SNTP时间同步完成");
+
+    // 生成本设备的随机偏移（0 ~ 7200秒，即0~2小时）
+    // 使用设备MAC作为种子的一部分，使同一设备每次启动的随机偏移相对稳定
+    uint32_t random_offset = esp_random() % DAILY_SYNC_WINDOW_SECONDS;
+
+    while (1) {
+        // 获取当前时间
+        time_t now_time;
+        struct tm now_tm;
+        time(&now_time);
+        localtime_r(&now_time, &now_tm);
+
+        // 计算距离下一个同步时间点的秒数
+        uint32_t wait_seconds = calculate_seconds_until_sync(&now_tm, random_offset);
+
+        // 计算目标同步时间用于日志显示
+        uint32_t sync_hour = DAILY_SYNC_START_HOUR + (random_offset / 3600);
+        uint32_t sync_min = (random_offset % 3600) / 60;
+        uint32_t sync_sec = random_offset % 60;
+
+        ESP_LOGI(TAG, "每日同步：下次同步时间 %02lu:%02lu:%02lu，等待 %lu 秒", sync_hour, sync_min,
+                 sync_sec, wait_seconds);
+
+        // 等待到同步时间
+        vTaskDelay(pdMS_TO_TICKS(wait_seconds * 1000));
+
+        // 检查MQTT是否已连接
+        if (mqtt_state != MQTT_STATE_CONNECTED || mqtt_client == NULL) {
+            ESP_LOGW(TAG, "每日同步：MQTT未连接，跳过本次同步");
+            // 等待1小时后重试
+            vTaskDelay(pdMS_TO_TICKS(3600 * 1000));
+            continue;
+        }
+
+        // 发送同步消息（复用开机同步消息）
+        char* sync_msg = build_boot_sync_message();
+        if (sync_msg) {
+            ESP_LOGI(TAG, "每日同步：发送版本同步消息");
+            esp_mqtt_client_publish(mqtt_client, mqtt_client_cfg->publish_topic, sync_msg, 0,
+                                    MQTT_QOS, 0);
+            free(sync_msg);
+        }
+        else {
+            ESP_LOGE(TAG, "每日同步：构建同步消息失败");
+        }
+
+        // 生成下一天的新随机偏移
+        random_offset = esp_random() % DAILY_SYNC_WINDOW_SECONDS;
+    }
+}
+
+void mqtt_publish_therapy_record(const work_record_t* record)
+{
+    if (record == NULL) {
+        return;
+    }
+
+    if (mqtt_state != MQTT_STATE_CONNECTED || mqtt_client == NULL) {
+        ESP_LOGW(TAG, "MQTT未连接，光疗记录丢弃");
+        return;
+    }
+
+    char* msg = build_realtime_report_message(record);
+    if (msg) {
+        ESP_LOGI(TAG, "上报光疗记录: mode=%d, work_time=%d秒",
+                 record->mode, record->work_time);
+        esp_mqtt_client_publish(mqtt_client, mqtt_client_cfg->publish_topic,
+                               msg, 0, MQTT_QOS, 0);
+        free(msg);
+    }
+}
+
+void mqtt_publish_unbind_message(void)
+{
+    if (mqtt_state != MQTT_STATE_CONNECTED || mqtt_client == NULL || mqtt_client_cfg == NULL) {
+        ESP_LOGW(TAG, "MQTT未连接，跳过设备解绑消息发布");
+        return;
+    }
+
+    char* msg = build_unbind_message();
+    if (msg == NULL) {
+        ESP_LOGE(TAG, "构建设备解绑消息失败");
+        return;
+    }
+
+    int msg_id = esp_mqtt_client_publish(mqtt_client, mqtt_client_cfg->publish_topic,
+                                         msg, 0, MQTT_QOS, 0);
+    ESP_LOGI(TAG, "已发布设备解绑消息，不等待回复, msg_id=%d", msg_id);
+    free(msg);
+}
