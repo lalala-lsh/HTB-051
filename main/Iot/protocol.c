@@ -84,3 +84,90 @@ static cjson_protocol_t* generate_cjson(const char* cmd, bool need_rid)
     cJSON_AddStringToObject(pt->protocol_js, "DEVICE_CODE", sn);
     cJSON_AddNumberToObject(pt->protocol_js, "DEVICE_TIME", timestamp); // 使用时间戳
     cJSON_AddStringToObject(pt->protocol_js, "DEVICE_MAC", get_device_mac());
+
+    // 只有在需要时才生成RID
+    if (need_rid) {
+        char* rid = generate_message_rid();
+        if (rid) {
+            cJSON_AddStringToObject(pt->protocol_js, "RID", rid);
+            // rid现在是静态缓冲区，不需要free
+        }
+    }
+
+    return pt;
+}
+
+/**
+ * @brief 创建灯光参数对象（仅lighting + therapy）- 从light_manager获取实时状态
+ * @return cJSON参数对象，需要由调用者释放
+ */
+static cJSON* create_lighting_params_object(void)
+{
+    cJSON* params_obj = cJSON_CreateObject();
+    if (!params_obj) {
+        return NULL;
+    }
+
+    light_manager_t* lm = get_light_manager();
+
+    // 添加照明参数
+    cJSON* lighting = cJSON_CreateObject();
+    cJSON_AddNumberToObject(lighting, "mode", 0);
+
+    // 从light_manager获取实时开关状态
+    cJSON* lighting_state = cJSON_CreateObject();
+    cJSON_AddNumberToObject(lighting_state, "1", light_manager_is_on(lm, LIGHT_ID_UPPER) ? 1 : 0);
+    cJSON_AddNumberToObject(lighting_state, "2", light_manager_is_on(lm, LIGHT_ID_LOWER) ? 1 : 0);
+    cJSON_AddNumberToObject(lighting_state, "3", light_manager_is_on(lm, LIGHT_ID_AMBIENT) ? 1 : 0);
+    cJSON_AddItemToObject(lighting, "state", lighting_state);
+
+    // 从light_manager获取实时亮度
+    cJSON* lighting_brightness = cJSON_CreateObject();
+    cJSON_AddNumberToObject(lighting_brightness, "1",
+                            light_manager_get_light_brightness(lm, LIGHT_ID_UPPER));
+    cJSON_AddNumberToObject(lighting_brightness, "2",
+                            light_manager_get_light_brightness(lm, LIGHT_ID_LOWER));
+    cJSON_AddNumberToObject(lighting_brightness, "3",
+                            light_manager_get_light_brightness(lm, LIGHT_ID_AMBIENT));
+    cJSON_AddItemToObject(lighting, "brightness", lighting_brightness);
+
+    cJSON_AddItemToObject(params_obj, "lighting", lighting);
+
+    // 添加光疗参数 - 从light_manager获取实时状态
+    cJSON* therapy = cJSON_CreateObject();
+    cJSON_AddNumberToObject(therapy, "state", light_manager_get_red_mode(lm));
+
+    cJSON* therapy_brightness = cJSON_CreateObject();
+    cJSON_AddNumberToObject(therapy_brightness, "1", light_manager_get_therapy_brightness(lm, 0));
+    cJSON_AddNumberToObject(therapy_brightness, "2", light_manager_get_therapy_brightness(lm, 1));
+    cJSON_AddNumberToObject(therapy_brightness, "3", light_manager_get_therapy_brightness(lm, 2));
+    cJSON_AddItemToObject(therapy, "brightness", therapy_brightness);
+
+    cJSON_AddItemToObject(params_obj, "therapy", therapy);
+
+    return params_obj;
+}
+
+/**
+ * @brief 创建完整参数对象（包含所有设备参数）
+ * @return cJSON参数对象，需要由调用者释放
+ */
+static cJSON* create_params_object(void)
+{
+    // 先创建灯光参数
+    cJSON* params_obj = create_lighting_params_object();
+    if (!params_obj) {
+        return NULL;
+    }
+
+    // 添加其他参数
+    cJSON_AddNumberToObject(params_obj, "music_state", device_params_get_music_state());
+    cJSON_AddNumberToObject(params_obj, "voice_state", device_params_get_voice_state());
+    cJSON_AddNumberToObject(params_obj, "volume", device_params_get_music_volume());
+
+    cJSON_AddNumberToObject(params_obj, "constant_light_state",
+                            device_params_get_constant_light_state());
+    cJSON_AddNumberToObject(params_obj, "pir_state", device_params_get_pir_state());
+    cJSON_AddNumberToObject(params_obj, "dim_timeout", device_params_get_dim_timeout());
+    cJSON_AddNumberToObject(params_obj, "off_timeout", device_params_get_off_timeout());
+
