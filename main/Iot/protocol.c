@@ -171,3 +171,89 @@ static cJSON* create_params_object(void)
     cJSON_AddNumberToObject(params_obj, "dim_timeout", device_params_get_dim_timeout());
     cJSON_AddNumberToObject(params_obj, "off_timeout", device_params_get_off_timeout());
 
+    cJSON_AddNumberToObject(params_obj, "therapy_focus_state",
+                            device_params_get_therapy_focus_state());
+    cJSON_AddNumberToObject(params_obj, "therapy_sleep_state",
+                            device_params_get_therapy_sleep_state());
+    cJSON_AddNumberToObject(params_obj, "therapy_sleep_duration",
+                            device_params_get_therapy_sleep_duration());
+
+    return params_obj;
+}
+
+/**
+ * @brief 构建遗嘱消息
+ * @return 遗嘱消息JSON字符串，使用后需要free
+ */
+char* build_will_message(void)
+{
+    // 生成基础cJSON对象，需要自己生成RID
+    cjson_protocol_t* pt = generate_cjson(WILL_MESSAGE_CMD, true); // CMD=999 表示遗嘱消息
+    if (!pt) {
+        ESP_LOGE(TAG, "遗嘱消息创建失败");
+        return NULL;
+    }
+
+    // 转换为字符串
+    char* msg_str = cJSON_PrintUnformatted(pt->protocol_js);
+
+    // 释放资源
+    free_protocol_js(pt);
+
+    return msg_str;
+}
+
+/**
+ * @brief 构建心跳包
+ * @param power 设备电量百分比(0-100)
+ * @return 心跳包JSON字符串，使用后需要free
+ */
+char* build_heartbeat_message()
+{
+    // 生成基础cJSON对象，需要自己生成RID
+    cjson_protocol_t* pt = generate_cjson(HEART_BEAT_CMD, true);
+    if (!pt) {
+        ESP_LOGE(TAG, "心跳消息创建失败");
+        return NULL;
+    }
+
+    // 转换为字符串
+    char* msg_str = cJSON_PrintUnformatted(pt->protocol_js);
+
+    // 释放资源
+    free_protocol_js(pt);
+
+    return msg_str;
+}
+
+/**
+ * @brief 构建实时上报消息
+ * @param record 当前工作记录
+ * @return 实时上报JSON字符串，使用后需要free
+ */
+char* build_realtime_report_message(const work_record_t* record)
+{
+    if (record == NULL) {
+        ESP_LOGE(TAG, "实时上报参数无效");
+        return NULL;
+    }
+
+    // 生成基础cJSON对象，需要自己生成RID
+    cjson_protocol_t* pt = generate_cjson(REALTIME_REPORT_CMD, true);
+    if (!pt) {
+        ESP_LOGE(TAG, "实时上报消息创建失败");
+        return NULL;
+    }
+
+    // 添加工作记录信息
+    cJSON_AddNumberToObject(pt->protocol_js, "DEVICE_MODE", record->mode);
+    cJSON_AddNumberToObject(pt->protocol_js, "DEVICE_START_TIME", record->start_time);
+    cJSON_AddNumberToObject(pt->protocol_js, "DEVICE_END_TIME", record->end_time);
+    cJSON_AddNumberToObject(pt->protocol_js, "DEVICE_WORK_TIME", record->work_time);
+
+    // 转换为字符串
+    char* msg_str = cJSON_PrintUnformatted(pt->protocol_js);
+
+    // 释放资源
+    free_protocol_js(pt);
+
