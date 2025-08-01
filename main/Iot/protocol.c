@@ -257,3 +257,90 @@ char* build_realtime_report_message(const work_record_t* record)
     // 释放资源
     free_protocol_js(pt);
 
+    return msg_str;
+}
+
+/**
+ * @brief 构建设备解绑消息
+ * @return 设备解绑JSON字符串，使用后需要free
+ */
+char* build_unbind_message(void)
+{
+    // 生成基础cJSON对象，需要自己生成RID
+    cjson_protocol_t* pt = generate_cjson(UNBIND_CMD, true);
+    if (!pt) {
+        ESP_LOGE(TAG, "设备解绑消息创建失败");
+        return NULL;
+    }
+
+    // 转换为字符串
+    char* msg_str = cJSON_PrintUnformatted(pt->protocol_js);
+
+    // 释放资源
+    free_protocol_js(pt);
+
+    return msg_str;
+}
+
+/**
+ * @brief 构建开机同步协议版本消息
+ * @param params 设备参数
+ * @return 开机同步JSON字符串，使用后需要free
+ */
+char* build_boot_sync_message(void)
+{
+    // 生成基础cJSON对象，需要自己生成RID
+    cjson_protocol_t* pt = generate_cjson(BOOT_SYNC_CMD, true);
+    if (!pt) {
+        ESP_LOGE(TAG, "开机同步消息创建失败");
+        return NULL;
+    }
+
+    // 创建参数对象
+    cJSON* params_obj = create_params_object();
+    if (!params_obj) {
+        free_protocol_js(pt);
+        return NULL;
+    }
+
+    // 添加参数对象
+    cJSON_AddItemToObject(pt->protocol_js, "PARAMS", params_obj);
+
+    // 转换为字符串
+    char* msg_str = cJSON_PrintUnformatted(pt->protocol_js);
+
+    // 释放资源
+    free_protocol_js(pt);
+
+    return msg_str;
+}
+
+/**
+ * @brief 构建设备灯光参数同步消息（仅lighting + therapy）
+ * @return 参数同步JSON字符串，使用后需要free
+ */
+char* build_params_sync_message(void)
+{
+    // 生成基础cJSON对象，需要自己生成RID
+    cjson_protocol_t* pt = generate_cjson(PARAMS_SYNC_CMD, true);
+    if (!pt) {
+        ESP_LOGE(TAG, "参数同步消息创建失败");
+        return NULL;
+    }
+
+    // 创建灯光参数对象
+    cJSON* params_obj = create_lighting_params_object();
+    if (!params_obj) {
+        free_protocol_js(pt);
+        return NULL;
+    }
+
+    // 添加参数对象
+    cJSON_AddItemToObject(pt->protocol_js, "PARAMS", params_obj);
+
+    // 转换为字符串
+    char* msg_str = cJSON_PrintUnformatted(pt->protocol_js);
+
+    // 释放资源
+    free_protocol_js(pt);
+
