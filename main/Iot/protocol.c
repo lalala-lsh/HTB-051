@@ -344,3 +344,89 @@ char* build_params_sync_message(void)
     // 释放资源
     free_protocol_js(pt);
 
+    return msg_str;
+}
+
+/**
+ * @brief 构建获取设备参数回复消息
+ * @param request_rid 请求ID
+ * @param params 设备参数
+ * @param success 是否成功
+ * @return 回复JSON字符串，使用后需要free
+ */
+char* build_get_device_params_response(const char* request_rid, bool success)
+{
+    if (request_rid == NULL) {
+        ESP_LOGE(TAG, "获取设备参数回复参数无效");
+        return NULL;
+    }
+
+    // 生成基础cJSON对象，需要自己生成RID
+    cjson_protocol_t* pt = generate_cjson(GET_DEVICE_PARAMS_CMD, false);
+    if (!pt) {
+        ESP_LOGE(TAG, "参数同步消息创建失败");
+        return NULL;
+    }
+
+    // 创建参数对象
+    cJSON* params_obj = create_params_object();
+    if (!params_obj) {
+        free_protocol_js(pt);
+        return NULL;
+    }
+
+    // 添加参数对象
+    cJSON_AddItemToObject(pt->protocol_js, "PARAMS", params_obj);
+
+    cJSON_AddStringToObject(pt->protocol_js, "RID", request_rid);
+
+    // 转换为字符串
+    char* msg_str = cJSON_PrintUnformatted(pt->protocol_js);
+
+    // 释放资源
+    free_protocol_js(pt);
+
+    return msg_str;
+}
+
+char* build_set_device_params_response(const char* request_rid, const cJSON* key,
+                                       const cJSON* value, bool success)
+{
+    if (request_rid == NULL || key == NULL || value == NULL) {
+        ESP_LOGE(TAG, "设置设备参数回复参数无效");
+        return NULL;
+    }
+
+    // 生成基础cJSON对象，不自动生成RID（使用请求的RID）
+    cjson_protocol_t* pt = generate_cjson(SET_DEVICE_PARAMS_RESP_CMD, false);
+    if (!pt) {
+        ESP_LOGE(TAG, "设置参数回复消息创建失败");
+        return NULL;
+    }
+
+    // 添加请求的RID
+    cJSON_AddStringToObject(pt->protocol_js, "RID", request_rid);
+
+    // 原样返回SET_KEY（字符串类型）
+    if (cJSON_IsString(key)) {
+        cJSON_AddStringToObject(pt->protocol_js, "SET_KEY", key->valuestring);
+    }
+
+    // 原样返回SET_VALUE（可能是字符串、数字、对象等）
+    cJSON* value_copy = cJSON_Duplicate(value, true);
+    if (value_copy) {
+        cJSON_AddItemToObject(pt->protocol_js, "SET_VALUE", value_copy);
+    }
+
+    // 添加结果码
+    cJSON_AddStringToObject(pt->protocol_js, "RES_CODE", success ? "SUCCESS" : "FAIL");
+
+    // 转换为JSON字符串
+    char* json_str = cJSON_PrintUnformatted(pt->protocol_js);
+
+    // 释放cJSON对象
+    cJSON_Delete(pt->protocol_js);
+    pt->protocol_js = NULL;
+
+    return json_str;
+}
