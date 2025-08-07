@@ -83,3 +83,89 @@ static const char* get_request_id(const cJSON* json)
 
 /* ========================================================================== */
 /* 响应处理函数                                                                */
+/* ========================================================================== */
+
+/**
+ * @brief 处理设备解绑回复
+ * @param response JSON对象
+ * @return ESP_OK成功，其他值表示失败
+ */
+static esp_err_t handle_unbind_response(const cJSON* response)
+{
+    if (response == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const char* rid = get_request_id(response);
+    if (rid == NULL) {
+        ESP_LOGE(TAG, "获取请求ID失败");
+        return ESP_FAIL;
+    }
+
+    bool success = is_response_success(response);
+    ESP_LOGI(TAG, "设备解绑回复: %s, RID: %s", success ? "成功" : "失败", rid);
+
+    if (success) {
+        // TODO: 设备解绑成功，清除本地配置，返回未绑定状态
+    }
+    else {
+        // TODO: 设备解绑失败，可能需要重试
+    }
+
+    return ESP_OK;
+}
+
+/**
+ * @brief 处理开机同步协议版本回复
+ * @param response JSON对象
+ * @return ESP_OK成功，其他值表示失败
+ */
+static esp_err_t handle_boot_sync_response(const cJSON* response)
+{
+    if (response == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const char* rid = get_request_id(response);
+    if (rid == NULL) {
+        ESP_LOGE(TAG, "获取请求ID失败");
+        return ESP_FAIL;
+    }
+
+    bool success = is_response_success(response);
+    ESP_LOGI(TAG, "开机同步回复: %s, RID: %s", success ? "成功" : "失败", rid);
+
+    if (success) {
+        /* 检查是否有固件升级包；有包时本轮跳过音频更新 */
+        cJSON* package_obj = cJSON_GetObjectItem(response, "PACKAGE");
+        if (package_obj != NULL && cJSON_IsString(package_obj)) {
+            const char* url = package_obj->valuestring;
+            if (url != NULL && strlen(url) > 0) {
+                ESP_LOGI(TAG, "发现新固件包: %s", url);
+                ota_start(url);
+                ESP_LOGI(TAG, "检测到固件OTA，本轮跳过音频更新");
+                return ESP_OK;
+            }
+            else {
+                ESP_LOGI(TAG, "固件包URL为空,跳过OTA升级");
+            }
+        }
+        else {
+            ESP_LOGI(TAG, "没有新的固件包");
+        }
+
+        /* 处理音频更新数组 AUDIO: [{url, md5, size}] */
+        cJSON* audio_array = cJSON_GetObjectItem(response, "AUDIO");
+        if (audio_array != NULL) {
+            if (!cJSON_IsArray(audio_array)) {
+                ESP_LOGW(TAG, "AUDIO字段存在但不是数组，已忽略");
+            } else {
+                esp_err_t audio_ret = audio_update_start_from_json(audio_array);
+                if (audio_ret == ESP_OK) {
+                    ESP_LOGI(TAG, "音频更新任务已触发");
+                } else {
+                    ESP_LOGW(TAG, "音频更新未启动: %s", esp_err_to_name(audio_ret));
+                }
+            }
+        } else {
+            ESP_LOGI(TAG, "未发现音频更新字段AUDIO");
