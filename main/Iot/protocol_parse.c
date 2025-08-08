@@ -169,3 +169,88 @@ static esp_err_t handle_boot_sync_response(const cJSON* response)
             }
         } else {
             ESP_LOGI(TAG, "未发现音频更新字段AUDIO");
+        }
+
+        // TODO: 同步完成，设置设备状态为在线
+    }
+    else {
+        // TODO: 同步失败，稍后重试
+    }
+
+    return ESP_OK;
+}
+
+/* ========================================================================== */
+/* SET_VALUE 类型规范化                                                        */
+/* ========================================================================== */
+
+/**
+ * @brief 规范化therapy对象中的state字段为数字类型
+ *
+ * 服务端/App可能将state以字符串形式下发（如 "0"），设备回显时需统一为数字类型
+ */
+static void normalize_therapy_value(cJSON* therapy_obj)
+{
+    if (!therapy_obj || !cJSON_IsObject(therapy_obj)) return;
+
+    cJSON* state = cJSON_GetObjectItem(therapy_obj, "state");
+    if (state && cJSON_IsString(state)) {
+        int val = atoi(state->valuestring);
+        cJSON_ReplaceItemInObject(therapy_obj, "state", cJSON_CreateNumber(val));
+    }
+}
+
+/**
+ * @brief 规范化SET_VALUE中的数据类型，确保回显的值类型正确
+ */
+static void normalize_set_value(cJSON* value_obj, const char* key)
+{
+    if (!value_obj || !key) return;
+
+    if (strcmp(key, "therapy") == 0) {
+        normalize_therapy_value(value_obj);
+    }
+    else if (strcmp(key, "multi_set") == 0 && cJSON_IsObject(value_obj)) {
+        cJSON* therapy = cJSON_GetObjectItem(value_obj, "therapy");
+        if (therapy) {
+            normalize_therapy_value(therapy);
+        }
+    }
+}
+
+/* ========================================================================== */
+/* 命令处理函数                                                                */
+/* ========================================================================== */
+
+/**
+ * @brief 处理获取设备参数请求
+ * @param client MQTT客户端
+ * @param request JSON对象
+ * @return ESP_OK成功，其他值表示失败
+ */
+esp_err_t handle_get_device_params(esp_mqtt_client_handle_t client, const cJSON* request)
+{
+    if (client == NULL || request == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const char* rid = get_request_id(request);
+    if (rid == NULL) {
+        ESP_LOGE(TAG, "获取请求ID失败");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "收到获取设备参数请求, RID: %s", rid);
+
+    /* 构建回复消息 */
+    char* response_msg = build_get_device_params_response(rid, true);
+    if (response_msg == NULL) {
+        ESP_LOGE(TAG, "构建回复消息失败");
+        return ESP_FAIL;
+    }
+
+    /* 发送回复消息 */
+    esp_mqtt_client_publish(client, mqtt_client_get_publish_topic(), response_msg,
+                            strlen(response_msg), MQTT_QOS, 0);
+    ESP_LOGI(TAG, "已发送获取设备参数回复");
+
