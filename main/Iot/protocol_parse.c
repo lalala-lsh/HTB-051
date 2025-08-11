@@ -254,3 +254,89 @@ esp_err_t handle_get_device_params(esp_mqtt_client_handle_t client, const cJSON*
                             strlen(response_msg), MQTT_QOS, 0);
     ESP_LOGI(TAG, "已发送获取设备参数回复");
 
+    free(response_msg);
+    return ESP_OK;
+}
+
+/**
+ * @brief 处理设置设备参数请求
+ * @param client MQTT客户端
+ * @param request JSON对象
+ * @return ESP_OK成功，其他值表示失败
+ */
+esp_err_t handle_set_device_params(esp_mqtt_client_handle_t client, const cJSON* request)
+{
+    if (client == NULL || request == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    bool success = false;
+
+    /* 获取SET_KEY和SET_VALUE */
+    cJSON* key_obj = cJSON_GetObjectItem(request, "SET_KEY");
+    cJSON* value_obj = cJSON_GetObjectItem(request, "SET_VALUE");
+
+    if (key_obj == NULL || !cJSON_IsString(key_obj)) {
+        ESP_LOGE(TAG, "获取SET_KEY失败");
+        return ESP_FAIL;
+    }
+    if (value_obj == NULL) {
+        ESP_LOGE(TAG, "获取SET_VALUE失败");
+        return ESP_FAIL;
+    }
+
+    /* 判断是否为多参数设置 */
+    if (strcmp(key_obj->valuestring, "multi_set") == 0) {
+        /* 多参数设置 */
+        success = param_handler_process_multi(value_obj);
+    }
+    else {
+        /* 单参数设置 */
+        success = param_handler_process(key_obj->valuestring, value_obj);
+    }
+
+    /* 获取请求ID */
+    const char* rid = get_request_id(request);
+    if (rid == NULL) {
+        ESP_LOGE(TAG, "获取请求ID失败");
+        return ESP_FAIL;
+    }
+
+    /* 规范化SET_VALUE中的数据类型，确保回显值类型正确 */
+    normalize_set_value(value_obj, key_obj->valuestring);
+
+    /* 构建并发送回复消息 */
+    char* response_msg = build_set_device_params_response(rid, key_obj, value_obj, success);
+    if (response_msg == NULL) {
+        ESP_LOGE(TAG, "构建回复消息失败");
+        return ESP_FAIL;
+    }
+
+    // 打印回复消息
+    ESP_LOGI(TAG, "回复消息: %s", response_msg);
+
+    esp_mqtt_client_publish(client, mqtt_client_get_publish_topic(), response_msg,
+                            strlen(response_msg), MQTT_QOS, 0);
+    ESP_LOGI(TAG, "已发送设置设备参数回复: %s", success ? "SUCCESS" : "FAIL");
+
+    free(response_msg);
+    return ESP_OK;
+}
+
+/**
+ * @brief 处理服务器解绑命令
+ */
+esp_err_t handle_server_unbind(esp_mqtt_client_handle_t client, const cJSON* json_obj)
+{
+    if (client == NULL || json_obj == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // TODO: wifi_reset();
+    factory_reset();
+    return ESP_OK;
+}
+
+/* ========================================================================== */
+/* 消息入口                                                                    */
+/* ========================================================================== */
