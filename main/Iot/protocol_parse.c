@@ -340,3 +340,88 @@ esp_err_t handle_server_unbind(esp_mqtt_client_handle_t client, const cJSON* jso
 /* ========================================================================== */
 /* 消息入口                                                                    */
 /* ========================================================================== */
+
+/**
+ * @brief 处理接收到的MQTT消息
+ * @param client MQTT客户端
+ * @param data 接收到的数据
+ * @param data_len 数据长度
+ */
+void process_received_message(esp_mqtt_client_handle_t client, const char* data, int data_len)
+{
+    char *json_text = NULL;
+    cJSON* json = NULL;
+
+    if (data == NULL || data_len <= 0) {
+        ESP_LOGE(TAG, "收到无效消息");
+        return;
+    }
+
+    /* 拷贝并补零，避免对非null结尾缓冲区直接解析导致越界 */
+    json_text = (char *)malloc((size_t)data_len + 1);
+    if (json_text == NULL) {
+        ESP_LOGE(TAG, "JSON缓冲区分配失败");
+        return;
+    }
+    memcpy(json_text, data, (size_t)data_len);
+    json_text[data_len] = '\0';
+
+    /* 解析JSON消息 */
+    json = cJSON_Parse(json_text);
+    if (json == NULL) {
+        const char* error_ptr = cJSON_GetErrorPtr();
+        if (error_ptr != NULL) {
+            ESP_LOGE(TAG, "解析JSON失败: %s", error_ptr);
+        }
+        else {
+            ESP_LOGE(TAG, "解析JSON失败");
+        }
+        free(json_text);
+        return;
+    }
+
+    /* 获取命令码 */
+    int cmd = get_cmd_from_json(json);
+    if (cmd < 0) {
+        ESP_LOGE(TAG, "获取命令码失败");
+        cJSON_Delete(json);
+        free(json_text);
+        return;
+    }
+
+    /* 根据命令码处理不同类型的消息 */
+    esp_err_t result = ESP_OK;
+    switch (cmd) {
+        /* 设备上报响应 */
+        case CMD_REALTIME_REPORT_RESP:
+            break;
+        case CMD_UNBIND_RESP:
+            result = handle_unbind_response(json);
+            break;
+        case CMD_BOOT_SYNC_RESP:
+            result = handle_boot_sync_response(json);
+            break;
+
+        /* 服务器发送命令 */
+        case CMD_GET_DEVICE_PARAMS:
+            result = handle_get_device_params(client, json);
+            break;
+        case CMD_SET_DEVICE_PARAMS:
+            result = handle_set_device_params(client, json);
+            break;
+        case CMD_SERVER_UNBIND:
+            result = handle_server_unbind(client, json);
+            break;
+
+        default:
+            ESP_LOGW(TAG, "未知的命令码: %d", cmd);
+            break;
+    }
+
+    if (result != ESP_OK) {
+        ESP_LOGW(TAG, "处理消息失败: %s", esp_err_to_name(result));
+    }
+
+    cJSON_Delete(json);
+    free(json_text);
+}
