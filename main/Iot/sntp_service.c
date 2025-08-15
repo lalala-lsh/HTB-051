@@ -72,3 +72,77 @@ static void sntp_sync_task(void *pvParameters)
             }
             vTaskDelay(1000 / portTICK_PERIOD_MS);
             retry++;
+        }
+
+        if (!time_synced) {
+            // 切换到下一个服务器
+            current_server = (current_server + 1) % NTP_SERVERS_COUNT;
+            esp_sntp_stop();
+            vTaskDelay(1000 / portTICK_PERIOD_MS);
+            esp_sntp_setservername(0, NTP_SERVERS[current_server]);
+            esp_sntp_init();
+            ESP_LOGW(TAG, "同步失败，切换到下一个服务器");
+        }
+    }
+
+    // 时间同步成功后，打印当前时间
+    time_t now;
+    time(&now);
+    char strftime_buf[64];
+    struct tm timeinfo;
+    localtime_r(&now, &timeinfo);
+    strftime(strftime_buf, sizeof(strftime_buf), "%Y-%m-%d %H:%M:%S", &timeinfo);
+    ESP_LOGI(TAG, "时间同步成功，当前时间: %s", strftime_buf);
+
+    // 时间同步成功后，设置事件位
+    if (time_synced) {
+        xEventGroupSetBits(sntp_event_group, SNTP_SYNCED_BIT);
+        ESP_LOGI(TAG, "时间同步成功，设置同步事件位");
+    }
+
+    vTaskDelete(sntp_task_handle);
+}
+
+esp_err_t sntp_wait_sync(uint32_t timeout_ms)
+{
+    if (sntp_event_group == NULL) {
+        return ESP_FAIL;
+    }
+
+    EventBits_t bits = xEventGroupWaitBits(sntp_event_group,
+                                          SNTP_SYNCED_BIT,
+                                          pdFALSE,
+                                          pdTRUE,
+                                          pdMS_TO_TICKS(timeout_ms));
+
+    if (bits & SNTP_SYNCED_BIT) {
+        return ESP_OK;
+    }
+    return ESP_ERR_TIMEOUT;
+} 
+
+esp_err_t sntp_service_init(void)
+{
+    // 创建事件组
+    sntp_event_group = xEventGroupCreate();
+    if (sntp_event_group == NULL) {
+        ESP_LOGE(TAG, "Failed to create sntp event group");
+        return ESP_FAIL;
+    }
+
+    // 创建SNTP同步任务
+    xTaskCreate(sntp_sync_task,
+                "sntp_sync_task",
+                4096,
+                NULL,
+                5,
+                &sntp_task_handle);
+
+    if (sntp_task_handle == NULL) {
+        ESP_LOGE(TAG, "Failed to create sntp task");
+        vEventGroupDelete(sntp_event_group);
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
