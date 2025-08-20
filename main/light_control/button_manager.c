@@ -93,3 +93,98 @@ void button_manager_destroy(button_manager_t* manager)
  * @brief 启动按键扫描任务
  */
 esp_err_t button_manager_start(button_manager_t* manager,
+                                uint8_t priority,
+                                uint32_t stack_size)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (manager->task_handle != NULL) {
+        ESP_LOGW(TAG, "Task already running");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    // 初始化硬件
+    touch_button_init();
+
+    // 创建按键扫描任务
+    BaseType_t ret = xTaskCreate(button_scan_task,
+                                  "button_scan",
+                                  stack_size,
+                                  manager,
+                                  priority,
+                                  &manager->task_handle);
+
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create button scan task");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Button manager started (period=%dms, debounce=%d)",
+             manager->poll_period_ms,
+             manager->debounce_count_threshold);
+
+    return ESP_OK;
+}
+
+/**
+ * @brief 停止按键扫描任务
+ */
+esp_err_t button_manager_stop(button_manager_t* manager)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (manager->task_handle != NULL) {
+        vTaskDelete(manager->task_handle);
+        manager->task_handle = NULL;
+        ESP_LOGI(TAG, "Button scan task stopped");
+    }
+
+    return ESP_OK;
+}
+
+/**
+ * @brief 设置按键配置
+ */
+esp_err_t button_manager_set_config(button_manager_t* manager,
+                                     uint8_t button_id,
+                                     button_type_t type,
+                                     uint16_t long_press_time_ms)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (button_id >= 8) {
+        ESP_LOGE(TAG, "Invalid button ID: %d", button_id);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    manager->configs[button_id].id = button_id;
+    manager->configs[button_id].type = type;
+    manager->configs[button_id].hold_time_ms = 0;
+    manager->configs[button_id].long_press_time_ms = long_press_time_ms;
+    manager->configs[button_id].enabled = true;
+
+    return ESP_OK;
+}
+
+/**
+ * @brief 应用默认配置
+ */
+esp_err_t button_manager_apply_default_config(button_manager_t* manager)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 按键0-4: 滑动按键
+    for (int i = 0; i <= 4; i++) {
+        button_manager_set_config(manager, i, BUTTON_TYPE_SLIDE, 0);
