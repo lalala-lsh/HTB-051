@@ -188,3 +188,99 @@ esp_err_t button_manager_apply_default_config(button_manager_t* manager)
     // 按键0-4: 滑动按键
     for (int i = 0; i <= 4; i++) {
         button_manager_set_config(manager, i, BUTTON_TYPE_SLIDE, 0);
+    }
+
+    // 按键5: 单击环境光+下光组合控制,长按2秒关闭所有灯光
+    button_manager_set_config(manager, 5, BUTTON_TYPE_LONG_PRESS,
+                              BUTTON5_LONG_PRESS_TIME_MS);
+
+    // 按键6: 2秒切换专注模式音源,5秒切换A2DP模式
+    button_manager_set_config(manager, 6, BUTTON_TYPE_LONG_PRESS, BUTTON6_LONG_PRESS_TIME_MS);
+    manager->configs[6].hold_time_ms = BUTTON6_HOLD_TIME_MS;
+
+    // 按键7: 长按按键(支持单击+长按恢复出厂设置)
+    button_manager_set_config(manager, 7, BUTTON_TYPE_LONG_PRESS, BUTTON7_LONG_PRESS_TIME_MS);
+
+    ESP_LOGI(TAG, "Default config applied");
+    return ESP_OK;
+}
+
+/**
+ * @brief 设置轮询周期
+ */
+esp_err_t button_manager_set_poll_period(button_manager_t* manager,
+                                          uint16_t period_ms)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (period_ms == 0) {
+        ESP_LOGE(TAG, "Invalid poll period: %d", period_ms);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    manager->poll_period_ms = period_ms;
+    return ESP_OK;
+}
+
+/**
+ * @brief 设置消抖阈值
+ */
+esp_err_t button_manager_set_debounce_threshold(button_manager_t* manager,
+                                                 uint8_t threshold)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (threshold == 0) {
+        ESP_LOGE(TAG, "Invalid debounce threshold: %d", threshold);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    manager->debounce_count_threshold = threshold;
+    return ESP_OK;
+}
+
+/**
+ * @brief 注册按键事件回调函数
+ */
+esp_err_t button_manager_register_callback(button_manager_t* manager,
+                                            button_event_callback_t callback,
+                                            void* arg)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    manager->callback = callback;
+    manager->callback_arg = arg;
+
+    return ESP_OK;
+}
+
+/**
+ * @brief 按键扫描任务
+ */
+static void button_scan_task(void* arg)
+{
+    button_manager_t* manager = (button_manager_t*)arg;
+
+    ESP_LOGI(TAG, "Button scan task started");
+
+    while (1) {
+        // 1. 读取硬件原始数据
+        uint8_t flag = touch_button_read_flag();
+        uint8_t id = touch_button_read_id();
+        // ESP_LOGI(TAG, "flag = %d, id = %d", flag, id);
+
+        // 2. 检测滑动（按键ID变化）
+        if (flag == 0 && manager->last_stable_flag == 0) {
+            // 有按键按下，且上次也有按键按下
+            if (id != manager->last_stable_id) {
+                // 按键ID发生变化，触发滑动处理
+                handle_slide_change(manager, manager->last_stable_id, id);
