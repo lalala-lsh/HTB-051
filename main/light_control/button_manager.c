@@ -284,3 +284,98 @@ static void button_scan_task(void* arg)
             if (id != manager->last_stable_id) {
                 // 按键ID发生变化，触发滑动处理
                 handle_slide_change(manager, manager->last_stable_id, id);
+                manager->last_stable_id = id;
+            }
+        }
+
+        // 3. 处理按键按下
+        if (flag == 0) {
+            // 有按键按下
+            handle_button_press(manager, id);
+        } else {
+            // 无按键按下，处理所有可能的释放
+            for (int i = 0; i < 8; i++) {
+                if (manager->runtime[i].state != BUTTON_STATE_IDLE) {
+                    handle_button_release(manager, i);
+                }
+            }
+        }
+
+        // 4. 更新last_stable状态
+        manager->last_stable_flag = flag;
+        if (flag == 0) {
+            manager->last_stable_id = id;
+        }
+
+        // 5. 延时
+        vTaskDelay(pdMS_TO_TICKS(manager->poll_period_ms));
+    }
+}
+
+/**
+ * @brief 处理按键按下
+ */
+static void handle_button_press(button_manager_t* manager, uint8_t id)
+{
+    if (id >= 8) {
+        return;
+    }
+
+    button_runtime_t* rt = &manager->runtime[id];
+    button_config_t* cfg = &manager->configs[id];
+
+    switch (rt->state) {
+    case BUTTON_STATE_IDLE:
+        // 进入消抖状态
+        rt->state = BUTTON_STATE_DEBOUNCING;
+        rt->debounce_count = 1;
+        ESP_LOGD(TAG, "Button %d: IDLE -> DEBOUNCING", id);
+        break;
+
+    case BUTTON_STATE_DEBOUNCING:
+        rt->debounce_count++;
+        if (rt->debounce_count >= manager->debounce_count_threshold) {
+            // 消抖完成，进入按下状态
+            rt->state = BUTTON_STATE_PRESSED;
+            rt->press_time_count = 0;
+            rt->hold_event_fired = false;
+            rt->event_fired = false;
+
+            // 滑动按键：立即触发PRESSED事件
+            if (cfg->type == BUTTON_TYPE_SLIDE) {
+                trigger_event(manager, id, BUTTON_EVENT_PRESSED);
+                rt->event_fired = true;
+            }
+
+            ESP_LOGD(TAG, "Button %d: DEBOUNCING -> PRESSED", id);
+        }
+        break;
+
+    case BUTTON_STATE_PRESSED:
+        rt->press_time_count += manager->poll_period_ms;
+
+        if (cfg->hold_time_ms > 0 &&
+            !rt->hold_event_fired &&
+            rt->press_time_count >= cfg->hold_time_ms) {
+            trigger_event(manager, id, BUTTON_EVENT_HOLD_2S);
+            rt->hold_event_fired = true;
+            ESP_LOGD(TAG, "Button %d: HOLD_2S fired", id);
+        }
+
+        // 长按检测
+        if (cfg->type == BUTTON_TYPE_LONG_PRESS &&
+            !rt->event_fired &&
+            rt->press_time_count >= cfg->long_press_time_ms) {
+            rt->state = BUTTON_STATE_LONG_PRESSING;
+            trigger_event(manager, id, BUTTON_EVENT_LONG_PRESS);
+            rt->event_fired = true;
+            ESP_LOGD(TAG, "Button %d: PRESSED -> LONG_PRESSING", id);
+        }
+        break;
+
+    case BUTTON_STATE_LONG_PRESSING:
+        // 保持状态，等待释放
+        break;
+    }
+}
+
