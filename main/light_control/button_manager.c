@@ -379,3 +379,98 @@ static void handle_button_press(button_manager_t* manager, uint8_t id)
     }
 }
 
+/**
+ * @brief 处理按键释放
+ */
+static void handle_button_release(button_manager_t* manager, uint8_t id)
+{
+    if (id >= 8) {
+        return;
+    }
+
+    button_runtime_t* rt = &manager->runtime[id];
+    button_config_t* cfg = &manager->configs[id];
+
+    switch (rt->state) {
+    case BUTTON_STATE_DEBOUNCING:
+        // 消抖过程中释放，重置为IDLE
+        reset_button_state(manager, id);
+        ESP_LOGD(TAG, "Button %d: DEBOUNCING -> IDLE (released during debounce)", id);
+        break;
+
+    case BUTTON_STATE_PRESSED:
+        // 单击按键：触发SINGLE_CLICK事件
+        if (cfg->type == BUTTON_TYPE_CLICK) {
+            trigger_event(manager, id, BUTTON_EVENT_SINGLE_CLICK);
+        }
+        // 长按按键：如果没有触发长按，则触发单击
+        else if (cfg->type == BUTTON_TYPE_LONG_PRESS && !rt->event_fired &&
+                 !rt->hold_event_fired) {
+            trigger_event(manager, id, BUTTON_EVENT_SINGLE_CLICK);
+        }
+        // 触发RELEASED事件（所有类型）
+        trigger_event(manager, id, BUTTON_EVENT_RELEASED);
+
+        reset_button_state(manager, id);
+        ESP_LOGD(TAG, "Button %d: PRESSED -> IDLE", id);
+        break;
+
+    case BUTTON_STATE_LONG_PRESSING:
+        // 长按后释放
+        trigger_event(manager, id, BUTTON_EVENT_RELEASED);
+        reset_button_state(manager, id);
+        ESP_LOGD(TAG, "Button %d: LONG_PRESSING -> IDLE", id);
+        break;
+
+    case BUTTON_STATE_IDLE:
+        // 已经是IDLE状态，无需处理
+        break;
+    }
+}
+
+/**
+ * @brief 处理滑动切换
+ */
+static void handle_slide_change(button_manager_t* manager, uint8_t from_id, uint8_t to_id)
+{
+    if (from_id >= 8 || to_id >= 8) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "Slide detected: %d -> %d", from_id, to_id);
+
+    // 触发from_id的RELEASED事件
+    if (manager->runtime[from_id].state != BUTTON_STATE_IDLE) {
+        trigger_event(manager, from_id, BUTTON_EVENT_RELEASED);
+        reset_button_state(manager, from_id);
+    }
+
+    // 重置to_id的状态，准备重新消抖
+    reset_button_state(manager, to_id);
+}
+
+/**
+ * @brief 触发按键事件
+ */
+static void trigger_event(button_manager_t* manager, uint8_t id, button_event_t event)
+{
+    if (manager->callback != NULL) {
+        manager->callback(id, event, manager->callback_arg);
+    }
+}
+
+/**
+ * @brief 重置按键状态
+ */
+static void reset_button_state(button_manager_t* manager, uint8_t id)
+{
+    if (id >= 8) {
+        return;
+    }
+
+    manager->runtime[id].state = BUTTON_STATE_IDLE;
+    manager->runtime[id].debounce_count = 0;
+    manager->runtime[id].press_time_count = 0;
+    manager->runtime[id].hold_event_fired = false;
+    manager->runtime[id].event_fired = false;
+}
