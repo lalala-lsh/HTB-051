@@ -94,3 +94,99 @@ typedef struct button_manager button_manager_t;
 #define BUTTON_ID_5   5  // 长按按键(单击+2s长按关灯)
 #define BUTTON_ID_6   6  // 长按按键(单击+2s专注音源切换+5s长按)
 #define BUTTON_ID_7   7  // 长按按键(单击+10s长按)
+
+/**
+ * @brief 创建按键管理器实例
+ *
+ * @return button_manager_t* 成功返回管理器指针，失败返回NULL
+ */
+button_manager_t* button_manager_create(void);
+
+/**
+ * @brief 销毁按键管理器实例
+ *
+ * @param manager 按键管理器指针
+ */
+void button_manager_destroy(button_manager_t* manager);
+
+/**
+ * @brief 启动按键扫描任务
+ *
+ * @param manager 按键管理器指针
+ * @param priority 任务优先级
+ * @param stack_size 任务栈大小(字节)
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t button_manager_start(button_manager_t* manager,
+                                uint8_t priority,
+                                uint32_t stack_size);
+
+/**
+ * @brief 停止按键扫描任务
+ *
+ * @param manager 按键管理器指针
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t button_manager_stop(button_manager_t* manager);
+
+/**
+ * @brief 设置按键配置
+ *
+ * @param manager 按键管理器指针
+ * @param button_id 按键ID (0-7)
+ * @param type 按键类型
+ * @param long_press_time_ms 长按阈值(ms)
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t button_manager_set_config(button_manager_t* manager,
+                                     uint8_t button_id,
+                                     button_type_t type,
+                                     uint16_t long_press_time_ms);
+
+/**
+ * @brief 应用默认配置
+ *
+ * 默认配置:
+ * - 按键0-4: 滑动按键
+ * - 按键5: 长按按键(单击环境光+下光组合控制+2s长按关灯)
+ * - 按键6: 长按按键(2s切换专注音源+5s切换A2DP模式)
+ * - 按键7: 长按按键(10s恢复出厂设置)
+ *
+ * @param manager 按键管理器指针
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t button_manager_apply_default_config(button_manager_t* manager);
+
+/**
+ * @brief 设置轮询周期
+ *
+ * @param manager 按键管理器指针
+ * @param period_ms 轮询周期(ms)
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t button_manager_set_poll_period(button_manager_t* manager,
+                                          uint16_t period_ms);
+
+/**
+ * @brief 设置消抖阈值
+ *
+ * @param manager 按键管理器指针
+ * @param threshold 消抖阈值(次数)
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t button_manager_set_debounce_threshold(button_manager_t* manager,
+                                                 uint8_t threshold);
+
+/**
+ * @brief 注册按键事件回调函数
+ *
+ * @param manager 按键管理器指针
+ * @param callback 回调函数
+ * @param arg 用户自定义参数
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t button_manager_register_callback(button_manager_t* manager,
+                                            button_event_callback_t callback,
+                                            void* arg);
+
+#endif // _BUTTON_MANAGER_H_
