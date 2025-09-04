@@ -92,3 +92,98 @@ void factory_reset(void)
 
     // 6. 延时后重启设备
     vTaskDelay(pdMS_TO_TICKS(2000));
+    esp_restart();
+}
+
+/**
+ * @brief 按键事件回调函数
+ *
+ * @param button_id 按键ID
+ * @param event 事件类型
+ * @param arg 用户参数
+ */
+static void on_button_event(uint8_t button_id, button_event_t event, void* arg)
+{
+    if (!g_buttons_enabled) {
+        ESP_LOGD(TAG, "按键未启用,忽略事件: id=%d event=%d", button_id, event);
+        return;
+    }
+
+    // 按键0-4：全局亮度控制（反向映射：按键4→10%, 按键3→40%, ...按键0→100%）
+    if (button_id <= BUTTON_ID_4) {
+        if (event == BUTTON_EVENT_PRESSED) {
+            // 反向映射：按键4→档位0(10%), 按键3→档位1(40%), ...按键0→档位4(100%)
+            brightness_level_t level = (brightness_level_t)(4 - button_id);
+            light_manager_set_brightness_level(g_light_manager, level);
+            mqtt_notify_light_change();
+        }
+        return;
+    }
+
+    // 按键5-7：独立处理
+    switch (button_id) {
+        // case BUTTON_ID_4: // 保持滑动10%亮度 / 长按2秒关闭所有灯光
+        //     if (event == BUTTON_EVENT_LONG_PRESS) {
+        //         ESP_LOGI(TAG, "Button 4 long pressed for 2s, turning off all lights...");
+        //         light_manager_turn_off_all(g_light_manager, true);
+        //         mqtt_notify_light_change();
+        //     }
+        //     break;
+        case BUTTON_ID_5: // 环境光+下光组合控制 / 长按2秒关闭所有灯光
+            if (event == BUTTON_EVENT_SINGLE_CLICK) {
+                light_manager_cycle_combo(g_light_manager);
+                mqtt_notify_light_change();
+            } else if (event == BUTTON_EVENT_LONG_PRESS) {
+                ESP_LOGI(TAG, "Button 5 long pressed for 2s, turning off all lights...");
+                light_manager_turn_off_all(g_light_manager, true);
+                mqtt_notify_light_change();
+            }
+            break;
+
+        case BUTTON_ID_6: // 红光模式切换 / 2秒切换专注音源 / 长按5秒切换A2DP↔本地模式
+            if (event == BUTTON_EVENT_SINGLE_CLICK) {
+                light_manager_cycle_red_mode(g_light_manager);
+                mqtt_notify_light_change();
+            } else if (event == BUTTON_EVENT_HOLD_2S) {
+                if (light_manager_get_red_mode(g_light_manager) == RED_LIGHT_MODE_THERAPY) {
+                    ESP_LOGI(TAG, "Button 6 held for 2s in focus mode, toggling focus source...");
+                    light_manager_toggle_focus_source(g_light_manager);
+                }
+            } else if (event == BUTTON_EVENT_LONG_PRESS) {
+                if (audio_mode_is_a2dp()) {
+                    ESP_LOGI(TAG, "Button 6 long pressed for 5s, switching back to local mode...");
+                    audio_mode_switch_to_local();
+
+                    red_light_mode_t red_mode = light_manager_get_red_mode(g_light_manager);
+                    if ((red_mode == RED_LIGHT_MODE_THERAPY &&
+                         light_manager_get_focus_source(g_light_manager) == FOCUS_SOURCE_AUDIO) ||
+                        (red_mode == RED_LIGHT_MODE_NORMAL && audio_queue_get_music_enabled())) {
+                        const char *bgm = (red_mode == RED_LIGHT_MODE_THERAPY) ? MUSIC_40HZ : MUSIC;
+                        audio_queue_set_background_music(bgm, true);
+                        audio_queue_play(A2DP_CLOSE, AUDIO_TYPE_SYSTEM, AUDIO_PRIORITY_HIGH, true);
+                    } else {
+                        audio_queue_play(A2DP_CLOSE, AUDIO_TYPE_SYSTEM, AUDIO_PRIORITY_HIGH, false);
+                    }
+                } else {
+                    ESP_LOGI(TAG, "Button 6 long pressed for 5s, switching to A2DP mode...");
+                    audio_queue_play(A2DP_OPEN, AUDIO_TYPE_SYSTEM, AUDIO_PRIORITY_HIGH, false);
+                    audio_mode_switch_to_a2dp();
+                }
+            }
+            break;
+
+        case BUTTON_ID_7: // 上光开关 / 长按10秒恢复出厂设置
+            if (event == BUTTON_EVENT_SINGLE_CLICK) {
+                light_manager_toggle(g_light_manager, LIGHT_ID_UPPER, true);
+                mqtt_notify_light_change();
+            } else if (event == BUTTON_EVENT_LONG_PRESS) {
+                ESP_LOGW(TAG, "Button 7 long pressed for 10s, triggering factory reset...");
+                factory_reset();
+            }
+            break;
+
+        default:
+            break;
+    }
+}
+
