@@ -187,3 +187,97 @@ static void on_button_event(uint8_t button_id, button_event_t event, void* arg)
     }
 }
 
+void light_control_start(void)
+{
+    // 1. 初始化LEDC
+    ledc_init();
+
+    led_status_init();
+
+    // 2. 创建灯光管理器
+    g_light_manager = light_manager_create();
+    if (g_light_manager == NULL) {
+        ESP_LOGE(TAG, "Failed to create light manager");
+        return;
+    }
+
+    // 3. 初始化灯光管理器（从NVS加载状态）
+    esp_err_t ret = light_manager_init(g_light_manager);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to init light manager");
+        light_manager_destroy(g_light_manager);
+        return;
+    }
+
+    // 4. 创建按键管理器
+    g_button_manager = button_manager_create();
+    if (g_button_manager == NULL) {
+        ESP_LOGE(TAG, "Failed to create button manager");
+        light_manager_destroy(g_light_manager);
+        return;
+    }
+
+    // 5. 应用默认配置
+    ret = button_manager_apply_default_config(g_button_manager);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to apply default config");
+        button_manager_destroy(g_button_manager);
+        light_manager_destroy(g_light_manager);
+        return;
+    }
+
+    // 6. 注册回调
+    ret = button_manager_register_callback(g_button_manager, on_button_event, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register callback");
+        button_manager_destroy(g_button_manager);
+        light_manager_destroy(g_light_manager);
+        return;
+    }
+
+    // 7. 启动按键管理器（增大栈大小以容纳 light_manager 的调用）
+    ret = button_manager_start(g_button_manager, 9, 4096);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start button manager");
+        button_manager_destroy(g_button_manager);
+        light_manager_destroy(g_light_manager);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Light control started successfully");
+    ESP_LOGI(TAG, " - Light manager initialized");
+    ESP_LOGI(TAG, " - Button manager started");
+}
+
+void light_control_set_buttons_enabled(bool enabled)
+{
+    g_buttons_enabled = enabled;
+    ESP_LOGI(TAG, "本地按键%s", enabled ? "已启用" : "已禁用");
+}
+
+light_manager_t* get_light_manager(void)
+{
+    return g_light_manager;
+}
+
+void light_control_stop(void)
+{
+    ESP_LOGI(TAG, "Stopping light control...");
+
+    // 停止并销毁按键管理器
+    if (g_button_manager != NULL) {
+        button_manager_stop(g_button_manager);
+        button_manager_destroy(g_button_manager);
+        g_button_manager = NULL;
+        ESP_LOGI(TAG, "Button manager stopped and destroyed");
+    }
+
+    // 销毁灯光管理器
+    if (g_light_manager != NULL) {
+        light_manager_destroy(g_light_manager);
+        g_light_manager = NULL;
+        ESP_LOGI(TAG, "Light manager destroyed");
+    }
+
+    ESP_LOGI(TAG, "Light control stopped");
+}
