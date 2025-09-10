@@ -188,3 +188,192 @@ light_manager_t* light_manager_create(void)
         return NULL;
     }
 
+    manager->auto_close_40hz = xTimerCreate("auto_close_40hz", pdMS_TO_TICKS(THERAPY_AUTO_CLOSE_TIME_MS),
+                                            pdFALSE, manager, auto_close_40hz_timer_callback);
+
+    // 创建红光闪烁定时器（使用常量定义周期）
+    manager->blink_timer = xTimerCreate("red_blink", pdMS_TO_TICKS(RED_BLINK_TIMER_PERIOD_MS),
+                                       pdTRUE, manager, red_blink_timer_callback);
+    if (manager->blink_timer == NULL) {
+        ESP_LOGE(TAG, "Failed to create blink timer");
+        vSemaphoreDelete(manager->mutex);
+        free(manager);
+        return NULL;
+    }
+
+    ESP_LOGI(TAG, "Light manager created with mutex protection");
+    return manager;
+}
+
+void light_manager_destroy(light_manager_t* manager)
+{
+    if (manager == NULL) {
+        return;
+    }
+
+    // 停止闪烁（如果正在闪烁）
+    if (manager->is_blinking && manager->blink_timer != NULL) {
+        xTimerStop(manager->blink_timer, 0);
+    }
+
+    // 删除定时器
+    if (manager->blink_timer != NULL) {
+        xTimerDelete(manager->blink_timer, 0);
+        manager->blink_timer = NULL;
+    }
+
+    if (manager->auto_close_40hz != NULL) {
+        xTimerDelete(manager->auto_close_40hz, 0);
+        manager->auto_close_40hz = NULL;
+    }
+
+    // 关闭NVS（如果打开）
+    if (manager->settings != NULL) {
+        settings_end(manager->settings);
+        manager->settings = NULL;
+    }
+
+    // 删除互斥锁
+    if (manager->mutex != NULL) {
+        vSemaphoreDelete(manager->mutex);
+        manager->mutex = NULL;
+    }
+
+    // 释放内存
+    heap_caps_free(manager);
+    ESP_LOGI(TAG, "Light manager destroyed");
+}
+
+esp_err_t light_manager_init(light_manager_t* manager)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 加载NVS状态
+    light_manager_load_state(manager);
+
+    manager->initialized = true;
+    ESP_LOGI(TAG, "Light manager initialized");
+    return ESP_OK;
+}
+
+// =============================================================================
+// 灯光控制
+// =============================================================================
+
+esp_err_t light_manager_turn_on(light_manager_t* manager, light_id_t light_id, bool use_fade)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (light_id >= LIGHT_ID_MAX) {
+        ESP_LOGE(TAG, "Invalid light ID: %d", light_id);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    LOCK(manager);
+
+    // 打开NVS（如果需要）
+    open_nvs_if_needed(manager);
+
+    light_state_t* light = &manager->lights[light_id];
+
+    // 如果已经开启，直接返回
+    if (light->is_on) {
+        ESP_LOGD(TAG, "Light %d already ON", light_id);
+        UNLOCK(manager);
+        return ESP_OK;
+    }
+
+    // 使用该灯自己保存的亮度百分比（从NVS加载或上次设置的值）
+    // 注意：不使用global_brightness，因为每个灯独立保存亮度
+    light->duty = brightness_percent_to_duty(light->brightness);
+
+    // 应用到硬件
+    uint32_t fade_time = use_fade ? manager->fade_time_ms : 0;
+    esp_err_t ret = light_set_duty_with_time(light->channel, light->duty, fade_time);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set duty for light %d", light_id);
+        UNLOCK(manager);
+        return ret;
+    }
+
+    light->is_on = true;
+    ESP_LOGD(TAG, "Light %d turned ON (duty=%lu, brightness=%d, fade=%lums)", light_id, light->duty,
+             light->brightness, fade_time);
+
+    light_manager_sync_indicator_leds(manager);
+
+    // 通知状态变化
+    notify_change(manager, LIGHT_CHANGE_ON, light_id);
+
+    UNLOCK(manager);
+    return ESP_OK;
+}
+
+esp_err_t light_manager_turn_off(light_manager_t* manager, light_id_t light_id, bool use_fade)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (light_id >= LIGHT_ID_MAX) {
+        ESP_LOGE(TAG, "Invalid light ID: %d", light_id);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    LOCK(manager);
+
+    light_state_t* light = &manager->lights[light_id];
+
+    // 如果已经关闭，直接返回
+    if (!light->is_on) {
+        ESP_LOGD(TAG, "Light %d already OFF", light_id);
+        UNLOCK(manager);
+        return ESP_OK;
+    }
+
+    // 关闭灯光
+    uint32_t fade_time = use_fade ? manager->fade_time_ms : 0;
+    esp_err_t ret = light_set_duty_with_time(light->channel, 0, fade_time);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to turn off light %d", light_id);
+        UNLOCK(manager);
+        return ret;
+    }
+
+    light->is_on = false;
+    ESP_LOGD(TAG, "Light %d turned OFF (fade=%lums)", light_id, fade_time);
+
+    light_manager_sync_indicator_leds(manager);
+
+    // 通知状态变化
+    notify_change(manager, LIGHT_CHANGE_OFF, light_id);
+
+    // 检查是否所有灯都关闭，如果是则关闭NVS
+    close_nvs_if_all_off(manager);
+
+    UNLOCK(manager);
+    return ESP_OK;
+}
+
+esp_err_t light_manager_toggle(light_manager_t* manager, light_id_t light_id, bool use_fade)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (light_id >= LIGHT_ID_MAX) {
+        ESP_LOGE(TAG, "Invalid light ID: %d", light_id);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    LOCK(manager);
+    bool is_on = manager->lights[light_id].is_on;
+    UNLOCK(manager);
