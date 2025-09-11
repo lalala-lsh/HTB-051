@@ -377,3 +377,192 @@ esp_err_t light_manager_toggle(light_manager_t* manager, light_id_t light_id, bo
     LOCK(manager);
     bool is_on = manager->lights[light_id].is_on;
     UNLOCK(manager);
+
+    if (is_on) {
+        return light_manager_turn_off(manager, light_id, use_fade);
+    }
+    else {
+        audio_queue_play(UP_LIGHT, AUDIO_TYPE_FUNCTION, AUDIO_PRIORITY_HIGH, true);
+        return light_manager_turn_on(manager, light_id, use_fade);
+    }
+}
+
+// =============================================================================
+// 亮度控制
+// =============================================================================
+
+esp_err_t light_manager_set_brightness_level(light_manager_t* manager, brightness_level_t level)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (level > BRIGHTNESS_LEVEL_100) {
+        ESP_LOGE(TAG, "Invalid brightness level: %d", level);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    LOCK(manager);
+
+    // 档位 → 百分比转换
+    uint8_t percent = brightness_level_to_percent(level);
+    manager->global_brightness = percent;
+    uint32_t duty = brightness_percent_to_duty(percent);
+
+    ESP_LOGD(TAG, "Setting global brightness to level %d (%d%%, duty=%lu)", level, percent, duty);
+
+    // 遍历所有开启的灯，统一更新亮度
+    for (int i = 0; i < LIGHT_ID_MAX; i++) {
+        if (!manager->lights[i].is_on) {
+            continue;
+        }
+
+        manager->lights[i].brightness = percent;
+
+        // 红光特殊处理
+        if (i == LIGHT_ID_RED) {
+            if (manager->red_mode == RED_LIGHT_MODE_NORMAL) {
+                manager->therapy_bright[0] = percent;
+                manager->lights[i].duty = duty;
+                esp_err_t ret = light_set_duty_with_time(manager->lights[i].channel, duty, manager->fade_time_ms);
+                if (ret != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to set brightness for red NORMAL mode");
+                    UNLOCK(manager);
+                    return ret;
+                }
+                ESP_LOGI(TAG, "Red NORMAL mode brightness updated to %d%%", percent);
+            }
+            else if (manager->red_mode == RED_LIGHT_MODE_THERAPY) {
+                manager->therapy_bright[1] = percent;
+                manager->lights[i].duty = RED_THERAPY_FIXED_DUTY;
+                /* 专注模式已移除蜂鸣器，仅更新亮度配置 */
+                ESP_LOGI(TAG, "Red THERAPY mode brightness config updated to %d%%", percent);
+            }
+            else if (manager->red_mode == RED_LIGHT_MODE_SLEEP) {
+                uint8_t sleep_percent = sleep_brightness_level_to_percent(level);
+                manager->therapy_bright[2] = percent;
+                manager->lights[i].brightness = percent;
+                manager->lights[i].duty = brightness_percent_to_duty(sleep_percent);
+                esp_err_t ret = light_set_duty_with_time(manager->lights[i].channel,
+                                                         manager->lights[i].duty, manager->fade_time_ms);
+                if (ret != ESP_OK) {
+                    ESP_LOGE(TAG, "Failed to set brightness for red SLEEP mode");
+                    UNLOCK(manager);
+                    return ret;
+                }
+                ESP_LOGI(TAG, "Red SLEEP mode brightness updated to %d%% (actual %d%%)", percent, sleep_percent);
+            }
+        }
+        else {
+            // 非红光：正常调节亮度
+            manager->lights[i].duty = duty;
+            esp_err_t ret = light_set_duty_with_time(manager->lights[i].channel, duty, manager->fade_time_ms);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to set brightness for light %d", i);
+                UNLOCK(manager);
+                return ret;
+            }
+            ESP_LOGD(TAG, "Light %d brightness updated to %d%%", i, percent);
+        }
+    }
+
+    // 通知亮度变化（light_id=-1表示全局）
+    notify_change(manager, LIGHT_CHANGE_BRIGHTNESS, -1);
+
+    UNLOCK(manager);
+    return ESP_OK;
+}
+
+brightness_level_t light_manager_get_brightness_level(light_manager_t* manager)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return BRIGHTNESS_LEVEL_100;
+    }
+
+    LOCK(manager);
+
+    // 将当前百分比值映射回最接近的档位枚举（用于外部查询）
+    uint8_t percent = manager->global_brightness;
+    brightness_level_t level;
+    if (percent <= 25)
+        level = BRIGHTNESS_LEVEL_10;
+    else if (percent <= 50)
+        level = BRIGHTNESS_LEVEL_40;
+    else if (percent <= 70)
+        level = BRIGHTNESS_LEVEL_60;
+    else if (percent <= 90)
+        level = BRIGHTNESS_LEVEL_80;
+    else
+        level = BRIGHTNESS_LEVEL_100;
+
+    UNLOCK(manager);
+    return level;
+}
+
+esp_err_t light_manager_set_temporary_brightness_level(light_manager_t* manager,
+                                                       brightness_level_t level)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (level > BRIGHTNESS_LEVEL_100) {
+        ESP_LOGE(TAG, "Invalid brightness level: %d", level);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    LOCK(manager);
+
+    // 档位 → 百分比转换
+    uint8_t percent = brightness_level_to_percent(level);
+    uint32_t duty = brightness_percent_to_duty(percent);
+
+    ESP_LOGI(TAG, "设置临时亮度: %d%% (不修改保存值)", percent);
+
+    // 遍历所有开启的灯，只修改duty，不修改brightness字段
+    for (int i = 0; i < LIGHT_ID_MAX; i++) {
+        if (!manager->lights[i].is_on) {
+            continue;
+        }
+
+        // 助眠模式下红光不受临时亮度影响（PIR/恒光隔离）
+        if (i == LIGHT_ID_RED && manager->red_mode == RED_LIGHT_MODE_SLEEP) {
+            continue;
+        }
+
+        if (i == LIGHT_ID_RED && manager->red_mode == RED_LIGHT_MODE_THERAPY) {
+            /* 专注模式已移除蜂鸣器，临时亮度不作用于红光固定占空比 */
+            ESP_LOGD(TAG, "THERAPY模式临时调暗: 红光保持固定占空比%d", RED_THERAPY_FIXED_DUTY);
+        }
+        else {
+            // 非红光或红光NORMAL模式：正常调节亮度
+            esp_err_t ret = light_set_duty_with_time(manager->lights[i].channel, duty, manager->fade_time_ms);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "设置临时亮度失败 light=%d", i);
+                UNLOCK(manager);
+                return ret;
+            }
+            if (i == LIGHT_ID_RED && manager->red_mode == RED_LIGHT_MODE_NORMAL) {
+                ESP_LOGI(TAG, "红光护眼模式临时调暗到%d%% (brightness保持=%d%%)",
+                         percent, manager->lights[i].brightness);
+            }
+            ESP_LOGD(TAG, "Light %d 临时duty=%lu (brightness保持=%d%%)", i, duty,
+                     manager->lights[i].brightness);
+        }
+    }
+
+    // 不调用notify_change()，避免触发回调
+
+    UNLOCK(manager);
+    return ESP_OK;
+}
+
+esp_err_t light_manager_restore_saved_brightness(light_manager_t* manager)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
