@@ -566,3 +566,193 @@ esp_err_t light_manager_restore_saved_brightness(light_manager_t* manager)
         ESP_LOGE(TAG, "Manager is NULL");
         return ESP_ERR_INVALID_ARG;
     }
+
+    LOCK(manager);
+
+    for (int i = 0; i < LIGHT_ID_MAX; i++) {
+        if (!manager->lights[i].is_on) {
+            continue;
+        }
+
+        uint32_t duty = manager->lights[i].duty;
+
+        if (i == LIGHT_ID_RED) {
+            if (manager->red_mode == RED_LIGHT_MODE_NORMAL) {
+                duty = brightness_percent_to_duty(manager->lights[i].brightness);
+            }
+            else if (manager->red_mode == RED_LIGHT_MODE_THERAPY) {
+                duty = RED_THERAPY_FIXED_DUTY;
+            }
+            else if (manager->red_mode == RED_LIGHT_MODE_SLEEP) {
+                uint8_t actual_percent = (uint8_t)(manager->lights[i].brightness * 20 / 100);
+                if (actual_percent < 1) {
+                    actual_percent = 1;
+                }
+                duty = brightness_percent_to_duty(actual_percent);
+            }
+            else {
+                continue;
+            }
+        }
+        else {
+            duty = brightness_percent_to_duty(manager->lights[i].brightness);
+        }
+
+        manager->lights[i].duty = duty;
+        esp_err_t ret = light_set_duty_with_time(manager->lights[i].channel,
+                                                 duty, manager->fade_time_ms);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "恢复保存亮度失败 light=%d", i);
+            UNLOCK(manager);
+            return ret;
+        }
+
+        ESP_LOGI(TAG, "恢复保存亮度 light=%d brightness=%d%% duty=%lu",
+                 i, manager->lights[i].brightness, duty);
+    }
+
+    UNLOCK(manager);
+    return ESP_OK;
+}
+
+// =============================================================================
+// 模式控制
+// =============================================================================
+
+esp_err_t light_manager_cycle_combo(light_manager_t* manager)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    LOCK(manager);
+
+    sync_combo_state_from_lights(manager);
+    combo_state_t current_state = manager->combo_state;
+    combo_state_t next_state = current_state;
+    esp_err_t ret = ESP_OK;
+
+    switch (current_state) {
+        case COMBO_STATE_ALL_OFF:
+            // 状态0 → 状态1: 环境光ON + 下光ON
+            ret = light_manager_turn_on(manager, LIGHT_ID_AMBIENT, true);
+            if (ret == ESP_OK) {
+                ret = light_manager_turn_on(manager, LIGHT_ID_LOWER, true);
+            }
+            if (ret == ESP_OK) {
+                next_state = COMBO_STATE_BOTH_ON;
+                audio_queue_play(DOWM_LIGHT, AUDIO_TYPE_FUNCTION, AUDIO_PRIORITY_HIGH, true);
+                ESP_LOGI(TAG, "Combo: ALL_OFF -> BOTH_ON");
+            }
+            break;
+
+        case COMBO_STATE_BOTH_ON:
+            // 状态1 → 状态2: 环境光保持（不动作） + 下光OFF
+            ret = light_manager_turn_off(manager, LIGHT_ID_LOWER, true);
+            // 环境光不操作，保持开启状态
+            if (ret == ESP_OK) {
+                next_state = COMBO_STATE_AMBIENT_ONLY;
+                audio_queue_play(AROUND_LIGHT, AUDIO_TYPE_FUNCTION, AUDIO_PRIORITY_HIGH, true);
+                ESP_LOGI(TAG, "Combo: BOTH_ON -> AMBIENT_ONLY");
+            }
+            break;
+
+        case COMBO_STATE_AMBIENT_ONLY:
+            // 状态2 → 状态0: 环境光OFF + 下光已经是OFF
+            ret = light_manager_turn_off(manager, LIGHT_ID_AMBIENT, true);
+            if (ret == ESP_OK) {
+                next_state = COMBO_STATE_ALL_OFF;
+                ESP_LOGI(TAG, "Combo: AMBIENT_ONLY -> ALL_OFF");
+            }
+            break;
+
+        default:
+            ESP_LOGE(TAG, "Invalid combo state: %d", current_state);
+            UNLOCK(manager);
+            return ESP_ERR_INVALID_STATE;
+    }
+
+    if (ret == ESP_OK) {
+        manager->combo_state = next_state;
+        light_manager_sync_indicator_leds(manager);
+    }
+
+    UNLOCK(manager);
+    return ret;
+}
+
+esp_err_t light_manager_reset_combo_state(light_manager_t* manager)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    LOCK(manager);
+    if (manager->combo_state != COMBO_STATE_ALL_OFF) {
+        ESP_LOGI(TAG, "Combo state reset: %d -> %d", manager->combo_state, COMBO_STATE_ALL_OFF);
+    }
+    manager->combo_state = COMBO_STATE_ALL_OFF;
+    UNLOCK(manager);
+    return ESP_OK;
+}
+
+esp_err_t light_manager_cycle_red_mode(light_manager_t* manager)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    LOCK(manager);
+
+    red_light_mode_t current_mode = manager->red_mode;
+    bool focus_enabled = (device_params_get_therapy_focus_state() == 1);
+    bool sleep_enabled = (device_params_get_therapy_sleep_state() == 1);
+
+    /* 确定下一个模式（动态循环，护眼始终存在） */
+    red_light_mode_t next_mode;
+    switch (current_mode) {
+        case RED_LIGHT_MODE_OFF:
+            next_mode = RED_LIGHT_MODE_NORMAL;
+            break;
+        case RED_LIGHT_MODE_NORMAL:
+            if (focus_enabled)
+                next_mode = RED_LIGHT_MODE_THERAPY;
+            else if (sleep_enabled)
+                next_mode = RED_LIGHT_MODE_SLEEP;
+            else
+                next_mode = RED_LIGHT_MODE_OFF;
+            break;
+        case RED_LIGHT_MODE_THERAPY:
+            if (sleep_enabled)
+                next_mode = RED_LIGHT_MODE_SLEEP;
+            else
+                next_mode = RED_LIGHT_MODE_OFF;
+            break;
+        case RED_LIGHT_MODE_SLEEP:
+            next_mode = RED_LIGHT_MODE_OFF;
+            break;
+        default:
+            ESP_LOGE(TAG, "Invalid red mode: %d", current_mode);
+            UNLOCK(manager);
+            return ESP_ERR_INVALID_STATE;
+    }
+
+    /* 从当前模式切走时先上报记录 */
+    if (current_mode != RED_LIGHT_MODE_OFF) {
+        publish_therapy_record_if_valid(manager, current_mode);
+    }
+
+    esp_err_t ret = ESP_OK;
+    switch (next_mode) {
+        case RED_LIGHT_MODE_OFF:
+            ret = apply_red_mode_off(manager, false, false);
+            notify_change(manager, LIGHT_CHANGE_OFF, LIGHT_ID_RED);
+            break;
+        case RED_LIGHT_MODE_NORMAL:
+            ret = apply_red_mode_normal(manager, manager->therapy_bright[0], true, true);
+            notify_change(manager, LIGHT_CHANGE_ON, LIGHT_ID_RED);
+            break;
+        case RED_LIGHT_MODE_THERAPY:
