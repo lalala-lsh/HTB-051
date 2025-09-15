@@ -756,3 +756,193 @@ esp_err_t light_manager_cycle_red_mode(light_manager_t* manager)
             notify_change(manager, LIGHT_CHANGE_ON, LIGHT_ID_RED);
             break;
         case RED_LIGHT_MODE_THERAPY:
+            ret = apply_red_mode_therapy(manager, manager->therapy_bright[1], true, true);
+            notify_change(manager, LIGHT_CHANGE_ON, LIGHT_ID_RED);
+            break;
+        case RED_LIGHT_MODE_SLEEP:
+            ret = apply_red_mode_sleep(manager, manager->therapy_bright[2], true, true);
+            notify_change(manager, LIGHT_CHANGE_ON, LIGHT_ID_RED);
+            break;
+    }
+
+    if (ret == ESP_OK) {
+        manager->red_mode = next_mode;
+        light_manager_sync_indicator_leds(manager);
+        ESP_LOGI(TAG, "Red mode: %d -> %d", current_mode, next_mode);
+    }
+
+    UNLOCK(manager);
+    return ret;
+}
+
+red_light_mode_t light_manager_get_red_mode(light_manager_t* manager)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return RED_LIGHT_MODE_OFF;
+    }
+
+    LOCK(manager);
+    red_light_mode_t mode = manager->red_mode;
+    UNLOCK(manager);
+    return mode;
+}
+
+uint8_t light_manager_get_therapy_brightness(light_manager_t* manager, int mode)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return 0;
+    }
+
+    if (mode < 0 || mode > 2) {
+        ESP_LOGE(TAG, "Invalid mode: %d", mode);
+        return 0;
+    }
+
+    LOCK(manager);
+    uint8_t brightness = manager->therapy_bright[mode];
+    UNLOCK(manager);
+    return brightness;
+}
+
+focus_source_t light_manager_get_focus_source(light_manager_t* manager)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return FOCUS_SOURCE_AUDIO;
+    }
+
+    LOCK(manager);
+    focus_source_t source = manager->focus_source;
+    UNLOCK(manager);
+    return source;
+}
+
+esp_err_t light_manager_toggle_focus_source(light_manager_t* manager)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    LOCK(manager);
+
+    if (manager->red_mode != RED_LIGHT_MODE_THERAPY) {
+        UNLOCK(manager);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    focus_source_t next_source = (manager->focus_source == FOCUS_SOURCE_AUDIO) ?
+                                 FOCUS_SOURCE_BUZZER : FOCUS_SOURCE_AUDIO;
+    esp_err_t ret = ESP_OK;
+
+    if (next_source == FOCUS_SOURCE_BUZZER) {
+        ret = apply_focus_source_buzzer(manager);
+    } else {
+        ret = apply_focus_source_audio(manager, true);
+    }
+
+    if (ret == ESP_OK) {
+        manager->focus_source = next_source;
+        device_params_set_focus_source((uint8_t)next_source);
+        ESP_LOGI(TAG, "Focus source switched to %s",
+                 next_source == FOCUS_SOURCE_AUDIO ? "audio" : "buzzer");
+    }
+
+    UNLOCK(manager);
+    return ret;
+}
+
+combo_state_t light_manager_get_combo_state(light_manager_t* manager)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return COMBO_STATE_ALL_OFF;
+    }
+
+    LOCK(manager);
+    combo_state_t state = manager->combo_state;
+    UNLOCK(manager);
+    return state;
+}
+
+// =============================================================================
+// 状态查询
+// =============================================================================
+
+esp_err_t light_manager_turn_off_all(light_manager_t* manager, bool use_fade)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    LOCK(manager);
+
+    esp_err_t ret = ESP_OK;
+    esp_err_t first_error = ESP_OK;
+
+    /* 上报光疗训练记录（如果>=5分钟）*/
+    publish_therapy_record_if_valid(manager, manager->red_mode);
+    manager->therapy_recording = false;
+
+    /* 关闭所有灯光 */
+    for (int i = 0; i < LIGHT_ID_MAX; i++) {
+        ret = light_manager_turn_off(manager, i, use_fade);
+        if (ret != ESP_OK && first_error == ESP_OK) {
+            first_error = ret;  // 记录第一个错误
+        }
+    }
+
+    /* 关闭蜂鸣器（如果红光在光疗模式） */
+    if (manager->buzzer_on) {
+        light_set_duty(BUZZER_CHANNEL, 0);
+        manager->buzzer_on = false;
+    }
+
+    audio_queue_stop();
+
+    /* 停止40Hz自动关闭定时器 */
+    if (manager->auto_close_40hz != NULL) {
+        xTimerStop(manager->auto_close_40hz, 0);
+    }
+
+    /* 重置所有状态机 */
+    manager->combo_state = COMBO_STATE_ALL_OFF;
+    manager->red_mode = RED_LIGHT_MODE_OFF;
+
+    /* 恢复全局亮度为默认值（避免下次开灯使用调暗后的亮度） */
+    manager->global_brightness = BRIGHTNESS_LEVEL_60;
+
+    light_manager_sync_indicator_leds(manager);
+
+    /* 恢复红光PWM频率为正常模式 */
+    light_switch_mode(MODE_NORMAL);
+
+    notify_change(manager, LIGHT_CHANGE_OFF, -1);
+
+    ESP_LOGI(TAG, "All lights turned off, states reset");
+
+    UNLOCK(manager);
+    return first_error;  // 返回第一个错误（如果有）
+}
+
+esp_err_t light_manager_suspend_outputs_for_ota(light_manager_t* manager)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    LOCK(manager);
+
+    esp_err_t first_error = ESP_OK;
+
+    for (int i = 0; i < LIGHT_ID_MAX; i++) {
+        esp_err_t ret = light_set_duty_with_time(manager->lights[i].channel, 0, manager->fade_time_ms);
+        if (ret != ESP_OK && first_error == ESP_OK) {
+            first_error = ret;
+        }
+    }
+
