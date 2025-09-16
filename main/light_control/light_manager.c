@@ -946,3 +946,192 @@ esp_err_t light_manager_suspend_outputs_for_ota(light_manager_t* manager)
         }
     }
 
+    esp_err_t ret = light_set_duty(BUZZER_CHANNEL, 0);
+    if (ret != ESP_OK && first_error == ESP_OK) {
+        first_error = ret;
+    }
+
+    UNLOCK(manager);
+
+    ret = audio_queue_stop();
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE && first_error == ESP_OK) {
+        first_error = ret;
+    }
+
+    ESP_LOGI(TAG, "OTA outputs suspended without changing saved states");
+    return first_error;
+}
+
+bool light_manager_is_any_on(light_manager_t* manager)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return false;
+    }
+
+    LOCK(manager);
+    bool is_any_on = false;
+    for (int i = 0; i < LIGHT_ID_MAX; i++) {
+        if (manager->lights[i].is_on) {
+            is_any_on = true;
+            break;
+        }
+    }
+    UNLOCK(manager);
+
+    return is_any_on;
+}
+
+bool light_manager_is_any_panel_on(light_manager_t* manager)
+{
+    if (manager == NULL) {
+        return false;
+    }
+
+    LOCK(manager);
+    bool panel_on = manager->lights[LIGHT_ID_AMBIENT].is_on ||
+                    manager->lights[LIGHT_ID_LOWER].is_on ||
+                    manager->lights[LIGHT_ID_UPPER].is_on;
+    UNLOCK(manager);
+
+    return panel_on;
+}
+
+bool light_manager_is_on(light_manager_t* manager, light_id_t light_id)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return false;
+    }
+
+    if (light_id >= LIGHT_ID_MAX) {
+        ESP_LOGE(TAG, "Invalid light ID: %d", light_id);
+        return false;
+    }
+
+    LOCK(manager);
+    bool is_on = manager->lights[light_id].is_on;
+    UNLOCK(manager);
+    return is_on;
+}
+
+uint8_t light_manager_get_light_brightness(light_manager_t* manager, light_id_t light_id)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return 0;
+    }
+
+    if (light_id >= LIGHT_ID_MAX) {
+        ESP_LOGE(TAG, "Invalid light ID: %d", light_id);
+        return 0;
+    }
+
+    LOCK(manager);
+    uint8_t brightness = manager->lights[light_id].brightness;
+    UNLOCK(manager);
+    return brightness;
+}
+
+// =============================================================================
+// NVS存储（预留接口）
+// =============================================================================
+
+esp_err_t light_manager_save_state(light_manager_t* manager)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (manager->settings == NULL) {
+        ESP_LOGW(TAG, "NVS not opened, skip save");
+        return ESP_OK;
+    }
+
+    // 保存各灯光亮度参数（直接存储百分比0-100，不保存状态）
+    settings_set_int(manager->settings, "up_bright", manager->lights[LIGHT_ID_UPPER].brightness);
+    settings_set_int(manager->settings, "lower_bright", manager->lights[LIGHT_ID_LOWER].brightness);
+    settings_set_int(manager->settings, "ambient_bright",
+                     manager->lights[LIGHT_ID_AMBIENT].brightness);
+
+    // 保存红光光疗参数
+    settings_set_int(manager->settings, "therapy_state", manager->red_mode);
+
+    // 保存三种红光模式的亮度配置（直接存储百分比0-100）
+    settings_set_int(manager->settings, "therapy_b0", manager->therapy_bright[0]);
+    settings_set_int(manager->settings, "therapy_b1", manager->therapy_bright[1]);
+    settings_set_int(manager->settings, "therapy_b2", manager->therapy_bright[2]);
+    settings_set_int(manager->settings, "focus_source", manager->focus_source);
+
+    ESP_LOGI(TAG, "Light state saved to NVS");
+    return ESP_OK;
+}
+
+esp_err_t light_manager_load_state(light_manager_t* manager)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 临时打开NVS加载参数
+    settings_t* settings = settings_start("device_params", false);
+    if (settings == NULL) {
+        ESP_LOGW(TAG, "Failed to open NVS for loading, use defaults");
+        return ESP_OK; // 首次使用或NVS损坏，使用默认值
+    }
+
+    // 加载各灯光亮度参数（直接读取百分比值，默认值60%）
+    int32_t up_bright = settings_get_int(settings, "up_bright", 60);
+    int32_t lower_bright = settings_get_int(settings, "lower_bright", 60);
+    int32_t ambient_bright = settings_get_int(settings, "ambient_bright", 60);
+
+    // 加载三种红光模式的亮度（直接读取百分比值）
+    int32_t therapy_b0 = settings_get_int(settings, "therapy_b0", 60);
+    int32_t therapy_b1 = settings_get_int(settings, "therapy_b1", 60);
+    int32_t therapy_b2 = settings_get_int(settings, "therapy_b2", 100);
+    int32_t focus_source = settings_get_int(settings, "focus_source", FOCUS_SOURCE_AUDIO);
+
+    // 关闭NVS
+    settings_end(settings);
+
+    // 应用到管理器（确保值在有效范围内0-100）
+    manager->lights[LIGHT_ID_UPPER].brightness =
+        (up_bright >= 0 && up_bright <= 100) ? (uint8_t)up_bright : 60;
+    manager->lights[LIGHT_ID_LOWER].brightness =
+        (lower_bright >= 0 && lower_bright <= 100) ? (uint8_t)lower_bright : 60;
+    manager->lights[LIGHT_ID_AMBIENT].brightness =
+        (ambient_bright >= 0 && ambient_bright <= 100) ? (uint8_t)ambient_bright : 60;
+
+    // 加载三种红光模式的亮度配置（百分比）
+    manager->therapy_bright[0] = (therapy_b0 >= 0 && therapy_b0 <= 100) ? (uint8_t)therapy_b0 : 60;
+    manager->therapy_bright[1] = (therapy_b1 >= 0 && therapy_b1 <= 100) ? (uint8_t)therapy_b1 : 60;
+    manager->therapy_bright[2] = (therapy_b2 >= 0 && therapy_b2 <= 100) ? (uint8_t)therapy_b2 : 100;
+    manager->focus_source = (focus_source == FOCUS_SOURCE_BUZZER) ?
+                            FOCUS_SOURCE_BUZZER : FOCUS_SOURCE_AUDIO;
+
+    // 红光模式状态不恢复（始终从OFF开始，确保安全）
+    manager->red_mode = RED_LIGHT_MODE_OFF;
+
+    // 更新全局亮度为环境光亮度（作为参考）
+    manager->global_brightness = manager->lights[LIGHT_ID_AMBIENT].brightness;
+
+    ESP_LOGI(TAG,
+             "Light state loaded from NVS (up=%d%%, lower=%d%%, ambient=%d%%, therapy[0]=%d%%, "
+             "therapy[1]=%d%%, focus_source=%d)",
+             manager->lights[LIGHT_ID_UPPER].brightness, manager->lights[LIGHT_ID_LOWER].brightness,
+             manager->lights[LIGHT_ID_AMBIENT].brightness, manager->therapy_bright[0],
+             manager->therapy_bright[1], manager->focus_source);
+
+    return ESP_OK;
+}
+
+// =============================================================================
+// 私有函数实现
+// =============================================================================
+
+/**
+ * @brief 如果需要，打开NVS
+ */
+static esp_err_t open_nvs_if_needed(light_manager_t* manager)
