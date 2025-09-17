@@ -1135,3 +1135,192 @@ esp_err_t light_manager_load_state(light_manager_t* manager)
  * @brief 如果需要，打开NVS
  */
 static esp_err_t open_nvs_if_needed(light_manager_t* manager)
+{
+    if (manager->settings == NULL) {
+        manager->settings = settings_start("device_params", true);
+        if (manager->settings == NULL) {
+            ESP_LOGE(TAG, "Failed to open NVS");
+            return ESP_FAIL;
+        }
+        ESP_LOGD(TAG, "NVS opened");
+    }
+    return ESP_OK;
+}
+
+/**
+ * @brief 如果所有灯都关闭，关闭NVS
+ */
+static esp_err_t close_nvs_if_all_off(light_manager_t* manager)
+{
+    if (!light_manager_is_any_on(manager) && manager->settings != NULL) {
+        // 保存状态（预留）
+        light_manager_save_state(manager);
+
+        // 关闭NVS（自动commit）
+        esp_err_t ret = settings_end(manager->settings);
+        manager->settings = NULL;
+
+        if (ret == ESP_OK) {
+            ESP_LOGD(TAG, "NVS closed and committed");
+        }
+        else {
+            ESP_LOGE(TAG, "Failed to close NVS");
+        }
+
+        return ret;
+    }
+
+    return ESP_OK;
+}
+
+/**
+ * @brief 亮度百分比转换为duty值（计算方式，不再查表）
+ * @param percent 亮度百分比（0-100）
+ * @return uint32_t PWM占空比（0-8191）
+ */
+static uint32_t brightness_percent_to_duty(uint8_t percent)
+{
+    if (percent > 100) {
+        percent = 100;
+    }
+    return (uint32_t)(percent * 8191UL / 100);
+}
+
+/**
+ * @brief 亮度档位转换为百分比（用于按键输入）
+ * 档位枚举 -> 实际百分比值
+ */
+static uint8_t brightness_level_to_percent(brightness_level_t level)
+{
+    switch (level) {
+        case BRIGHTNESS_LEVEL_10:
+            return 10;
+        case BRIGHTNESS_LEVEL_40:
+            return 40;
+        case BRIGHTNESS_LEVEL_60:
+            return 60;
+        case BRIGHTNESS_LEVEL_80:
+            return 80;
+        case BRIGHTNESS_LEVEL_100:
+            return 100;
+        default:
+            return 60; // 默认60%
+    }
+}
+
+/**
+ * @brief 助眠模式亮度档位转换（上限20%，每档4%）
+ */
+static uint8_t sleep_brightness_level_to_percent(brightness_level_t level)
+{
+    switch (level) {
+        case BRIGHTNESS_LEVEL_10:
+            return 4;
+        case BRIGHTNESS_LEVEL_40:
+            return 8;
+        case BRIGHTNESS_LEVEL_60:
+            return 12;
+        case BRIGHTNESS_LEVEL_80:
+            return 16;
+        case BRIGHTNESS_LEVEL_100:
+            return 20;
+        default:
+            return 20;
+    }
+}
+
+/**
+ * @brief 通知状态变化
+ */
+static void notify_change(light_manager_t* manager, light_change_type_t type, int light_id)
+{
+    if (manager->change_callback != NULL) {
+        manager->change_callback(type, light_id, manager->callback_arg);
+    }
+}
+
+static void sync_combo_state_from_lights(light_manager_t* manager)
+{
+    bool ambient_on = manager->lights[LIGHT_ID_AMBIENT].is_on;
+    bool lower_on = manager->lights[LIGHT_ID_LOWER].is_on;
+    combo_state_t synced_state;
+
+    if (ambient_on && lower_on) {
+        synced_state = COMBO_STATE_BOTH_ON;
+    } else if (ambient_on) {
+        synced_state = COMBO_STATE_AMBIENT_ONLY;
+    } else {
+        synced_state = COMBO_STATE_ALL_OFF;
+    }
+
+    if (manager->combo_state != synced_state) {
+        ESP_LOGI(TAG, "Combo state synced: %d -> %d (ambient=%d, lower=%d)",
+                 manager->combo_state, synced_state, ambient_on, lower_on);
+        manager->combo_state = synced_state;
+    }
+}
+
+/**
+ * @brief 同步面板指示灯状态（低电平点亮，高电平熄灭）
+ */
+void light_manager_sync_indicator_leds(light_manager_t* manager)
+{
+    if (manager == NULL) {
+        return;
+    }
+
+    bool upper_on = manager->lights[LIGHT_ID_UPPER].is_on;
+    bool lower_or_ambient_on = manager->lights[LIGHT_ID_LOWER].is_on ||
+                               manager->lights[LIGHT_ID_AMBIENT].is_on;
+    bool red_on = (manager->red_mode != RED_LIGHT_MODE_OFF);
+
+    gpio_set_level(LED1_IO_NUM, upper_on ? 0 : 1);
+    gpio_set_level(LED3_IO_NUM, lower_or_ambient_on ? 0 : 1);
+    gpio_set_level(LED2_IO_NUM, red_on ? 0 : 1);
+
+    ESP_LOGI(TAG, "指示灯同步: LED1=%d(上=%d), LED3=%d(下=%d,环境=%d), LED2=%d(红光模式=%d)",
+             upper_on ? 0 : 1, upper_on,
+             lower_or_ambient_on ? 0 : 1,
+             manager->lights[LIGHT_ID_LOWER].is_on,
+             manager->lights[LIGHT_ID_AMBIENT].is_on,
+             red_on ? 0 : 1, manager->red_mode);
+}
+
+/**
+ * @brief 发布光疗训练记录（如果满足条件）
+ */
+static void publish_therapy_record_if_valid(light_manager_t* manager, red_light_mode_t mode)
+{
+    if (!manager->therapy_recording) {
+        return;
+    }
+
+    time_t now;
+    time(&now);
+    int work_time = (int)(now - manager->therapy_start_time);
+    
+    if (work_time >= MIN_THERAPY_RECORD_TIME) {
+        work_record_t record = {
+            .start_time = manager->therapy_start_time,
+            .end_time = now,
+            .work_time = work_time,
+            .mode = mode
+        };
+        mqtt_publish_therapy_record(&record);
+        ESP_LOGI(TAG, "Published therapy record: mode=%d, time=%ds", mode, work_time);
+    }
+}
+
+/**
+ * @brief 应用红光OFF模式
+ */
+static esp_err_t apply_red_mode_off(light_manager_t* manager, bool use_fade, bool save_record)
+{
+    // 上报训练记录（如果>=5分钟）
+    if (save_record) {
+        publish_therapy_record_if_valid(manager, manager->red_mode);
+        manager->therapy_recording = false;
+    }
+
+    // 关闭红光并恢复正常模式定时器
+    esp_err_t ret = light_switch_mode(MODE_NORMAL);
