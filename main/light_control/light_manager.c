@@ -1324,3 +1324,193 @@ static esp_err_t apply_red_mode_off(light_manager_t* manager, bool use_fade, boo
 
     // 关闭红光并恢复正常模式定时器
     esp_err_t ret = light_switch_mode(MODE_NORMAL);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    manager->red_mode = RED_LIGHT_MODE_OFF;
+    manager->lights[LIGHT_ID_RED].is_on = false;
+    manager->buzzer_on = false;
+
+    // 应用到硬件：关闭红光和蜂鸣器
+    uint32_t fade_time = use_fade ? manager->fade_time_ms : 0;
+    light_set_duty_with_time(manager->lights[LIGHT_ID_RED].channel, 0, fade_time);
+    light_set_duty(BUZZER_CHANNEL, 0);
+
+    audio_queue_stop();
+
+    // 停止自动关闭定时器
+    if (manager->auto_close_40hz != NULL) {
+        xTimerStop(manager->auto_close_40hz, 0);
+    }
+
+    ESP_LOGI(TAG, "Red mode: OFF");
+    return ESP_OK;
+}
+
+/**
+ * @brief 应用红光NORMAL模式（护眼模式）
+ */
+static esp_err_t apply_red_mode_normal(light_manager_t* manager, uint8_t brightness, bool use_fade, bool play_audio)
+{
+    // 护眼模式：5kHz，使用brightness亮度
+    esp_err_t ret = light_switch_mode(MODE_NORMAL);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    manager->red_mode = RED_LIGHT_MODE_NORMAL;
+    manager->lights[LIGHT_ID_RED].is_on = true;
+    manager->lights[LIGHT_ID_RED].brightness = brightness;
+    manager->lights[LIGHT_ID_RED].duty = brightness_percent_to_duty(brightness);
+    manager->buzzer_on = false;
+
+    // 应用到硬件：设置红光亮度，关闭蜂鸣器
+    uint32_t fade_time = use_fade ? manager->fade_time_ms : 0;
+    light_set_duty_with_time(manager->lights[LIGHT_ID_RED].channel, 
+                             manager->lights[LIGHT_ID_RED].duty, fade_time);
+    light_set_duty(BUZZER_CHANNEL, 0);
+
+    // 开始记录训练时间
+    time(&manager->therapy_start_time);
+    manager->therapy_recording = true;
+
+    // 启动1小时定时器（确保周期为1小时，可能被助眠模式修改过）
+    if (manager->auto_close_40hz != NULL) {
+        xTimerChangePeriod(manager->auto_close_40hz, pdMS_TO_TICKS(THERAPY_AUTO_CLOSE_TIME_MS), 0);
+        xTimerReset(manager->auto_close_40hz, 0);
+    }
+
+    /* 切入护眼模式前清理旧背景音乐，避免从专注切换后继续恢复40Hz */
+    audio_queue_set_background_music(NULL, false);
+
+    // 护眼背景音乐受music_state控制；有TTS时由队列在播报完成后恢复，避免抢互斥锁
+    if (play_audio) {
+        if (audio_queue_get_music_enabled()) {
+            if (audio_queue_get_voice_enabled()) {
+                audio_queue_set_background_music(MUSIC, true);
+                audio_queue_play(CARE_MODE, AUDIO_TYPE_FUNCTION, AUDIO_PRIORITY_HIGH, true);
+            } else {
+                audio_queue_play_loop(MUSIC, AUDIO_TYPE_MUSIC_CTRL, AUDIO_PRIORITY_LOW);
+            }
+        } else if (audio_queue_get_voice_enabled()) {
+            audio_queue_play(CARE_MODE, AUDIO_TYPE_FUNCTION, AUDIO_PRIORITY_HIGH, false);
+        }
+    }
+
+    ESP_LOGI(TAG, "Red mode: NORMAL (5kHz, %d%%)", brightness);
+    return ESP_OK;
+}
+
+static esp_err_t apply_focus_source_audio(light_manager_t* manager, bool start_audio)
+{
+    esp_err_t ret = light_set_duty(BUZZER_CHANNEL, 0);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    manager->buzzer_on = false;
+
+    if (start_audio) {
+        audio_queue_set_background_music(MUSIC_40HZ, true);
+        ret = audio_queue_play_loop_force(MUSIC_40HZ, AUDIO_TYPE_MUSIC_CTRL, AUDIO_PRIORITY_LOW);
+    }
+
+    return ret;
+}
+
+static esp_err_t apply_focus_source_buzzer(light_manager_t* manager)
+{
+    esp_err_t ret = audio_queue_stop();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    audio_queue_set_background_music(NULL, false);
+
+    ret = light_set_duty(BUZZER_CHANNEL, RED_THERAPY_FIXED_DUTY);
+    if (ret == ESP_OK) {
+        manager->buzzer_on = true;
+    }
+
+    return ret;
+}
+
+/**
+ * @brief 应用红光THERAPY模式（专注模式）
+ */
+static esp_err_t apply_red_mode_therapy(light_manager_t* manager, uint8_t brightness, bool use_fade, bool play_audio)
+{
+    // 专注模式：40Hz，红光固定占空比，音源按保存偏好选择
+    esp_err_t ret = light_switch_mode(MODE_40HZ);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    manager->red_mode = RED_LIGHT_MODE_THERAPY;
+    manager->lights[LIGHT_ID_RED].is_on = true;
+    manager->lights[LIGHT_ID_RED].brightness = brightness;
+    manager->lights[LIGHT_ID_RED].duty = RED_THERAPY_FIXED_DUTY;
+    manager->focus_source = (device_params_get_focus_source() == FOCUS_SOURCE_BUZZER) ?
+                            FOCUS_SOURCE_BUZZER : FOCUS_SOURCE_AUDIO;
+
+    // 应用到硬件：设置红光固定占空比
+    uint32_t fade_time = use_fade ? manager->fade_time_ms : 0;
+    light_set_duty_with_time(manager->lights[LIGHT_ID_RED].channel, RED_THERAPY_FIXED_DUTY, fade_time);
+
+    // 开始记录训练时间
+    time(&manager->therapy_start_time);
+    manager->therapy_recording = true;
+
+    // 启动30分钟自动关闭定时器（专注模式固定时长）
+    if (manager->auto_close_40hz != NULL) {
+        xTimerChangePeriod(manager->auto_close_40hz, pdMS_TO_TICKS(THERAPY_FOCUS_DURATION_MS), 0);
+        xTimerReset(manager->auto_close_40hz, 0);
+    }
+
+    /* 切入专注模式前清理旧背景音乐，确保后续只恢复40Hz */
+    audio_queue_set_background_music(NULL, false);
+
+    if (manager->focus_source == FOCUS_SOURCE_BUZZER) {
+        ret = apply_focus_source_buzzer(manager);
+        if (ret != ESP_OK) {
+            return ret;
+        }
+        if (play_audio && audio_queue_get_voice_enabled()) {
+            audio_queue_play(FOCUS_MODE, AUDIO_TYPE_FUNCTION, AUDIO_PRIORITY_HIGH, false);
+        }
+    }
+    // 专注40Hz背景音不受music_state控制；有TTS时由队列在播报完成后恢复
+    else if (play_audio) {
+        light_set_duty(BUZZER_CHANNEL, 0);
+        manager->buzzer_on = false;
+        if (audio_queue_get_voice_enabled()) {
+            audio_queue_set_background_music(MUSIC_40HZ, true);
+            audio_queue_play(FOCUS_MODE, AUDIO_TYPE_FUNCTION, AUDIO_PRIORITY_HIGH, true);
+        } else {
+            audio_queue_play_loop_force(MUSIC_40HZ, AUDIO_TYPE_MUSIC_CTRL, AUDIO_PRIORITY_LOW);
+        }
+    } else {
+        ret = apply_focus_source_audio(manager, true);
+        if (ret != ESP_OK) {
+            return ret;
+        }
+    }
+    ESP_LOGI(TAG, "Red mode: THERAPY (40Hz, red_duty=%d, source=%s)",
+             RED_THERAPY_FIXED_DUTY,
+             manager->focus_source == FOCUS_SOURCE_AUDIO ? "audio" : "buzzer");
+    return ESP_OK;
+}
+
+/**
+ * @brief 应用红光SLEEP模式（助眠模式）
+ *
+ * 40Hz红光，无蜂鸣器，无音乐，亮度按20%上限缩放，
+ * 使用therapy_sleep_duration可配置的自动关闭时长
+ */
+static esp_err_t apply_red_mode_sleep(light_manager_t* manager, uint8_t brightness, bool use_fade, bool play_audio)
+{
+    esp_err_t ret = light_switch_mode(MODE_40HZ);
+    if (ret != ESP_OK) {
+        return ret;
+    }
