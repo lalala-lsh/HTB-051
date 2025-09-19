@@ -1514,3 +1514,193 @@ static esp_err_t apply_red_mode_sleep(light_manager_t* manager, uint8_t brightne
     if (ret != ESP_OK) {
         return ret;
     }
+
+    manager->red_mode = RED_LIGHT_MODE_SLEEP;
+    manager->lights[LIGHT_ID_RED].is_on = true;
+    manager->lights[LIGHT_ID_RED].brightness = brightness;
+
+    /* 亮度按20%上限缩放: brightness(1-100) -> 实际duty为 brightness*20/100 的占比 */
+    uint8_t actual_percent = (uint8_t)(brightness * 20 / 100);
+    if (actual_percent < 1) actual_percent = 1;
+    manager->lights[LIGHT_ID_RED].duty = brightness_percent_to_duty(actual_percent);
+
+    manager->buzzer_on = false;
+
+    /* 设置红光duty，关闭蜂鸣器 */
+    uint32_t fade_time = use_fade ? manager->fade_time_ms : 0;
+    light_set_duty_with_time(manager->lights[LIGHT_ID_RED].channel,
+                             manager->lights[LIGHT_ID_RED].duty, fade_time);
+    light_set_duty(BUZZER_CHANNEL, 0);
+
+    /* 记录训练时间 */
+    time(&manager->therapy_start_time);
+    manager->therapy_recording = true;
+
+    /* 启动自动关闭定时器（使用可配置时长） */
+    if (manager->auto_close_40hz != NULL) {
+        uint32_t duration_ms = device_params_get_therapy_sleep_duration() * 60 * 1000;
+        xTimerChangePeriod(manager->auto_close_40hz, pdMS_TO_TICKS(duration_ms), 0);
+        xTimerReset(manager->auto_close_40hz, 0);
+    }
+
+    /* 清除背景音乐状态，防止后续TTS（如亮度调节提示音）恢复40Hz背景音乐 */
+    audio_queue_set_background_music(NULL, false);
+
+    /* 播放TTS（不启动背景音乐） */
+    if (play_audio) {
+        audio_queue_play(SLEEPING_MODE, AUDIO_TYPE_FUNCTION, AUDIO_PRIORITY_HIGH, false);
+    }
+
+    ESP_LOGI(TAG, "Red mode: SLEEP (40Hz, brightness=%d%%, actual=%d%%, no buzzer/music)",
+             brightness, actual_percent);
+    return ESP_OK;
+}
+
+// =============================================================================
+// 回调注册
+// =============================================================================
+
+esp_err_t light_manager_register_change_callback(light_manager_t* manager,
+                                                 light_change_callback_t callback, void* arg)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    manager->change_callback = callback;
+    manager->callback_arg = arg;
+
+    ESP_LOGI(TAG, "Change callback registered");
+    return ESP_OK;
+}
+
+static void auto_close_40hz_timer_callback(TimerHandle_t xTimer)
+{
+    light_manager_t* manager = (light_manager_t*)pvTimerGetTimerID(xTimer);
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Timer callback: manager is NULL");
+        return;
+    }
+
+    time_t now;
+    time(&now);
+    int work_time = (int)(now - manager->therapy_start_time);
+
+    ESP_LOGI(TAG, "Therapy timer triggered, mode=%d, work_time=%ds", manager->red_mode, work_time);
+
+    work_record_t record = {
+        .start_time = manager->therapy_start_time,
+        .end_time = now,
+        .work_time = work_time,
+        .mode = manager->red_mode
+    };
+
+    if (manager->red_mode == RED_LIGHT_MODE_THERAPY ||
+        manager->red_mode == RED_LIGHT_MODE_SLEEP) {
+        /* 专注/助眠模式：定时器到时自动关闭，上报记录 */
+        mqtt_publish_therapy_record(&record);
+        manager->therapy_recording = false;
+        light_manager_set_therapy_state(manager, RED_LIGHT_MODE_OFF,
+                                        manager->therapy_bright[0],
+                                        manager->therapy_bright[1],
+                                        manager->therapy_bright[2], false);
+    } else if (manager->red_mode == RED_LIGHT_MODE_NORMAL) {
+        /* 护眼模式：上报记录后继续下一个小时 */
+        mqtt_publish_therapy_record(&record);
+        manager->therapy_start_time = now;
+        xTimerReset(manager->auto_close_40hz, 0);
+        ESP_LOGI(TAG, "NORMAL mode: timer reset for next hour");
+    }
+}
+
+// =============================================================================
+// MQTT协议接口实现
+// =============================================================================
+
+esp_err_t light_manager_set_light_state_percent(light_manager_t* manager, light_id_t light_id,
+                                                bool on, uint8_t brightness_percent, bool use_fade)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (light_id >= LIGHT_ID_MAX) {
+        ESP_LOGE(TAG, "Invalid light_id: %d", light_id);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    LOCK(manager);
+
+    // 限制亮度范围
+    if (brightness_percent < 1)
+        brightness_percent = 1;
+    if (brightness_percent > 100)
+        brightness_percent = 100;
+
+    light_state_t* light = &manager->lights[light_id];
+
+    if (on) {
+        // 开启灯光：先设置亮度和duty，再应用到硬件
+        manager->global_brightness = brightness_percent;
+        light->brightness = brightness_percent;
+        light->duty = brightness_percent_to_duty(brightness_percent);
+        light->is_on = true;
+
+        // 应用到硬件
+        uint32_t fade_time = use_fade ? manager->fade_time_ms : 0;
+        esp_err_t ret = light_set_duty_with_time(light->channel, light->duty, fade_time);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to set duty for light %d", light_id);
+            UNLOCK(manager);
+            return ret;
+        }
+
+        ESP_LOGI(TAG, "Set light %d ON with %d%% brightness", light_id, brightness_percent);
+        light_manager_sync_indicator_leds(manager);
+        notify_change(manager, LIGHT_CHANGE_ON, light_id);
+        notify_change(manager, LIGHT_CHANGE_BRIGHTNESS, -1); // 全局亮度变化
+    }
+    else {
+        // 关闭灯光
+        light->is_on = false;
+
+        // 应用到硬件：设置duty为0
+        uint32_t fade_time = use_fade ? manager->fade_time_ms : 0;
+        esp_err_t ret = light_set_duty_with_time(light->channel, 0, fade_time);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to turn off light %d", light_id);
+            UNLOCK(manager);
+            return ret;
+        }
+
+        ESP_LOGI(TAG, "Set light %d OFF", light_id);
+        light_manager_sync_indicator_leds(manager);
+        notify_change(manager, LIGHT_CHANGE_OFF, light_id);
+    }
+
+    UNLOCK(manager);
+    return ESP_OK;
+}
+
+esp_err_t light_manager_set_therapy_state(light_manager_t* manager, therapy_state_t therapy_state,
+                                          uint8_t brightness_normal, uint8_t brightness_therapy,
+                                          uint8_t brightness_sleep, bool use_fade)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    LOCK(manager);
+
+    // 限制亮度范围
+    if (brightness_normal < 1) brightness_normal = 1;
+    if (brightness_normal > 100) brightness_normal = 100;
+    if (brightness_therapy < 1) brightness_therapy = 1;
+    if (brightness_therapy > 100) brightness_therapy = 100;
+    if (brightness_sleep < 1) brightness_sleep = 1;
+    if (brightness_sleep > 100) brightness_sleep = 100;
+
+    // 保存三种模式的亮度配置
