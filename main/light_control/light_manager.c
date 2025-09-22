@@ -1704,3 +1704,192 @@ esp_err_t light_manager_set_therapy_state(light_manager_t* manager, therapy_stat
     if (brightness_sleep > 100) brightness_sleep = 100;
 
     // 保存三种模式的亮度配置
+    manager->therapy_bright[0] = brightness_normal;
+    manager->therapy_bright[1] = brightness_therapy;
+    manager->therapy_bright[2] = brightness_sleep;
+
+    red_light_mode_t previous_mode = manager->red_mode;
+    esp_err_t ret = ESP_OK;
+
+    /* 从非OFF模式切走时先上报记录 */
+    if (previous_mode != RED_LIGHT_MODE_OFF && previous_mode != therapy_state) {
+        publish_therapy_record_if_valid(manager, previous_mode);
+    }
+
+    bool play_audio = (previous_mode != therapy_state);
+
+    switch (therapy_state) {
+        case RED_LIGHT_MODE_OFF:
+            ret = apply_red_mode_off(manager, use_fade, false);
+            notify_change(manager, LIGHT_CHANGE_OFF, LIGHT_ID_RED);
+            break;
+
+        case RED_LIGHT_MODE_NORMAL:
+            ret = apply_red_mode_normal(manager, brightness_normal, use_fade, play_audio);
+            notify_change(manager, LIGHT_CHANGE_ON, LIGHT_ID_RED);
+            notify_change(manager, LIGHT_CHANGE_BRIGHTNESS, LIGHT_ID_RED);
+            break;
+
+        case RED_LIGHT_MODE_THERAPY:
+            ret = apply_red_mode_therapy(manager, brightness_therapy, use_fade, play_audio);
+            notify_change(manager, LIGHT_CHANGE_ON, LIGHT_ID_RED);
+            notify_change(manager, LIGHT_CHANGE_BRIGHTNESS, LIGHT_ID_RED);
+            break;
+
+        case RED_LIGHT_MODE_SLEEP:
+            ret = apply_red_mode_sleep(manager, brightness_sleep, use_fade, play_audio);
+            notify_change(manager, LIGHT_CHANGE_ON, LIGHT_ID_RED);
+            notify_change(manager, LIGHT_CHANGE_BRIGHTNESS, LIGHT_ID_RED);
+            break;
+
+        default:
+            ESP_LOGW(TAG, "Unknown therapy state: %d", therapy_state);
+            UNLOCK(manager);
+            return ESP_ERR_INVALID_ARG;
+    }
+
+    if (ret == ESP_OK) {
+        light_manager_sync_indicator_leds(manager);
+    }
+
+    UNLOCK(manager);
+    return ret;
+}
+
+// =============================================================================
+// 红光渐变闪烁功能（用于OTA升级等场景）
+// =============================================================================
+
+/**
+ * @brief 红光闪烁定时器回调函数
+ *
+ * 使用硬件渐变功能实现呼吸效果：
+ * - 0% → 100% → 0% 循环
+ * - 每个方向RED_BLINK_FADE_TIME_MS渐变，完整周期2秒
+ */
+static void red_blink_timer_callback(TimerHandle_t xTimer)
+{
+    light_manager_t* manager = (light_manager_t*)pvTimerGetTimerID(xTimer);
+    if (manager == NULL || !manager->is_blinking) {
+        return;
+    }
+
+    // 切换方向：亮 ↔ 暗
+    if (manager->blink_direction) {
+        // 从暗到亮：0% → 100%，渐变RED_BLINK_FADE_TIME_MS
+        light_set_duty_with_time(LED_R_CHANNEL, LEDC_MAX_DUTY, RED_BLINK_FADE_TIME_MS);
+        manager->blink_direction = false;
+    } else {
+        // 从亮到暗：100% → 0%，渐变RED_BLINK_FADE_TIME_MS
+        light_set_duty_with_time(LED_R_CHANNEL, 0, RED_BLINK_FADE_TIME_MS);
+        manager->blink_direction = true;
+    }
+}
+
+/**
+ * @brief 启动红光渐变闪烁
+ *
+ * 用于OTA升级等需要视觉反馈的场景。
+ * 红光以2秒周期进行平滑呼吸式闪烁（硬件PWM渐变）。
+ *
+ * @param manager 灯光管理器指针
+ * @return esp_err_t ESP_OK成功，其他失败
+ *
+ * @note 使用正常模式（5kHz PWM），不影响光疗设置
+ * @note 自动关闭蜂鸣器（如果开启）
+ */
+esp_err_t light_manager_start_red_blink(light_manager_t* manager)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (manager->blink_timer == NULL) {
+        ESP_LOGE(TAG, "Blink timer not created");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    LOCK(manager);
+
+    // 如果已经在闪烁，直接返回
+    if (manager->is_blinking) {
+        ESP_LOGW(TAG, "Red light is already blinking");
+        UNLOCK(manager);
+        return ESP_OK;
+    }
+
+    // 切换到正常模式（5kHz PWM）
+    esp_err_t ret = light_switch_mode(MODE_NORMAL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to switch to normal mode");
+        UNLOCK(manager);
+        return ret;
+    }
+
+    // 初始化闪烁状态
+    manager->is_blinking = true;
+    manager->blink_direction = true;  // 从暗到亮开始
+
+    // 关闭蜂鸣器（如果开启）
+    if (manager->buzzer_on) {
+        light_set_duty(BUZZER_CHANNEL, 0);
+        manager->buzzer_on = false;
+    }
+
+    // 启动第一次渐变：0% → 100%，RED_BLINK_FADE_TIME_MS
+    light_set_duty_with_time(LED_R_CHANNEL, LEDC_MAX_DUTY, RED_BLINK_FADE_TIME_MS);
+    manager->blink_direction = false;  // 下次从亮到暗
+
+    // 启动定时器（RED_BLINK_TIMER_PERIOD_MS周期，匹配渐变时间）
+    if (xTimerStart(manager->blink_timer, 0) != pdPASS) {
+        ESP_LOGE(TAG, "Failed to start blink timer");
+        manager->is_blinking = false;
+        UNLOCK(manager);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Red light blink started (breathing effect, 2s cycle)");
+    UNLOCK(manager);
+    return ESP_OK;
+}
+
+/**
+ * @brief 停止红光渐变闪烁
+ *
+ * 停止闪烁并关闭红光。
+ *
+ * @param manager 灯光管理器指针
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t light_manager_stop_red_blink(light_manager_t* manager)
+{
+    if (manager == NULL) {
+        ESP_LOGE(TAG, "Manager is NULL");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    LOCK(manager);
+
+    // 如果没有在闪烁，直接返回
+    if (!manager->is_blinking) {
+        ESP_LOGD(TAG, "Red light is not blinking");
+        UNLOCK(manager);
+        return ESP_OK;
+    }
+
+    // 停止定时器
+    if (manager->blink_timer != NULL) {
+        xTimerStop(manager->blink_timer, 0);
+    }
+
+    // 关闭红光（带渐变效果，200ms）
+    light_set_duty_with_time(LED_R_CHANNEL, 0, 200);
+
+    // 重置状态
+    manager->is_blinking = false;
+    manager->blink_direction = true;
+
+    ESP_LOGI(TAG, "Red light blink stopped");
+    UNLOCK(manager);
+    return ESP_OK;
