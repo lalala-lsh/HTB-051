@@ -88,3 +88,93 @@ void light_manager_destroy(light_manager_t* manager);
 esp_err_t light_manager_init(light_manager_t* manager);
 
 // =============================================================================
+// 灯光控制
+// =============================================================================
+
+/**
+ * @brief 开启指定灯光
+ *
+ * @param manager 灯光管理器指针
+ * @param light_id 灯光ID
+ * @param use_fade 是否使用渐变效果
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t light_manager_turn_on(light_manager_t* manager,
+                                 light_id_t light_id,
+                                 bool use_fade);
+
+/**
+ * @brief 关闭指定灯光
+ *
+ * @param manager 灯光管理器指针
+ * @param light_id 灯光ID
+ * @param use_fade 是否使用渐变效果
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t light_manager_turn_off(light_manager_t* manager,
+                                  light_id_t light_id,
+                                  bool use_fade);
+
+/**
+ * @brief 切换指定灯光开关状态
+ *
+ * @param manager 灯光管理器指针
+ * @param light_id 灯光ID
+ * @param use_fade 是否使用渐变效果
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t light_manager_toggle(light_manager_t* manager,
+                                light_id_t light_id,
+                                bool use_fade);
+
+// =============================================================================
+// 亮度控制
+// =============================================================================
+
+/**
+ * @brief 设置全局亮度档位（影响所有开启的灯）
+ *
+ * @param manager 灯光管理器指针
+ * @param level 亮度档位
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t light_manager_set_brightness_level(light_manager_t* manager,
+                                               brightness_level_t level);
+
+/**
+ * @brief 获取当前全局亮度档位
+ *
+ * @param manager 灯光管理器指针
+ * @return brightness_level_t 当前亮度档位
+ */
+brightness_level_t light_manager_get_brightness_level(light_manager_t* manager);
+
+/**
+ * @brief 设置临时亮度（不影响保存的亮度值）
+ *
+ * 用于PIR调暗等临时调节场景，只修改PWM输出，不修改brightness字段
+ *
+ * @param manager 灯光管理器指针
+ * @param level 临时亮度档位
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t light_manager_set_temporary_brightness_level(light_manager_t* manager,
+                                                        brightness_level_t level);
+
+/**
+ * @brief 恢复所有已开启灯光到各自保存的亮度
+ *
+ * 用于PIR临时调暗后的恢复。该接口只恢复PWM输出，不覆盖每盏灯保存的brightness值。
+ *
+ * @param manager 灯光管理器指针
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t light_manager_restore_saved_brightness(light_manager_t* manager);
+
+// =============================================================================
+// 模式控制
+// =============================================================================
+
+/**
+ * @brief 按键5：环境光+下光组合控制（3态循环）
+ *
