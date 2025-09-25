@@ -178,3 +178,94 @@ esp_err_t light_manager_restore_saved_brightness(light_manager_t* manager);
 /**
  * @brief 按键5：环境光+下光组合控制（3态循环）
  *
+ * 状态转换：
+ * 状态0（全关） -> 状态1（环境光ON + 下光ON） ->
+ * 状态2（环境光ON + 下光OFF） -> 状态0（全关）
+ *
+ * @param manager 灯光管理器指针
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t light_manager_cycle_combo(light_manager_t* manager);
+
+/**
+ * @brief 重置按键5组合状态为全关
+ *
+ * 用于外部流程直接关闭下光/环境光后，同步组合按键状态机。
+ *
+ * @param manager 灯光管理器指针
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t light_manager_reset_combo_state(light_manager_t* manager);
+
+/**
+ * @brief 按键6：红光模式切换（3态循环）
+ *
+ * 状态转换：
+ * OFF -> NORMAL（5kHz） -> THERAPY（40Hz + MUSIC_40HZ） -> OFF
+ *
+ * @param manager 灯光管理器指针
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t light_manager_cycle_red_mode(light_manager_t* manager);
+
+/**
+ * @brief 获取当前红光模式
+ *
+ * @param manager 灯光管理器指针
+ * @return red_light_mode_t 当前红光模式
+ */
+red_light_mode_t light_manager_get_red_mode(light_manager_t* manager);
+
+/**
+ * @brief 获取光疗模式的亮度配置
+ *
+ * @param manager 灯光管理器指针
+ * @param mode 0=护眼, 1=专注, 2=助眠
+ * @return uint8_t 亮度百分比 (0-100)
+ */
+uint8_t light_manager_get_therapy_brightness(light_manager_t* manager, int mode);
+
+/**
+ * @brief 获取专注模式当前音源偏好
+ *
+ * @param manager 灯光管理器指针
+ * @return focus_source_t 专注模式音源
+ */
+focus_source_t light_manager_get_focus_source(light_manager_t* manager);
+
+/**
+ * @brief 专注模式下切换音源
+ *
+ * 仅在RED_LIGHT_MODE_THERAPY下生效，不重置专注开始时间和30分钟自动关闭定时器。
+ *
+ * @param manager 灯光管理器指针
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t light_manager_toggle_focus_source(light_manager_t* manager);
+
+/**
+ * @brief 获取当前组合状态
+ *
+ * @param manager 灯光管理器指针
+ * @return combo_state_t 当前组合状态
+ */
+combo_state_t light_manager_get_combo_state(light_manager_t* manager);
+
+// =============================================================================
+// 状态变化回调
+// =============================================================================
+
+/**
+ * @brief 灯光状态变化类型
+ */
+typedef enum {
+    LIGHT_CHANGE_ON,         // 灯光开启
+    LIGHT_CHANGE_OFF,        // 灯光关闭
+    LIGHT_CHANGE_BRIGHTNESS, // 亮度变化
+} light_change_type_t;
+
+/**
+ * @brief 灯光状态变化回调函数类型
+ *
+ * @param change_type 变化类型
+ * @param light_id 灯光ID（亮度变化时为-1表示全局）
