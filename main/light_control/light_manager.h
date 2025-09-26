@@ -269,3 +269,93 @@ typedef enum {
  *
  * @param change_type 变化类型
  * @param light_id 灯光ID（亮度变化时为-1表示全局）
+ * @param arg 用户参数
+ */
+typedef void (*light_change_callback_t)(light_change_type_t change_type, int light_id, void* arg);
+
+/**
+ * @brief 注册灯光状态变化回调
+ *
+ * @param manager 灯光管理器指针
+ * @param callback 回调函数
+ * @param arg 用户参数
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t light_manager_register_change_callback(light_manager_t* manager,
+                                                  light_change_callback_t callback,
+                                                  void* arg);
+
+/**
+ * @brief 按当前灯光状态同步面板指示灯
+ *
+ * 指示灯低电平点亮，高电平熄灭：
+ * LED1 跟随上灯板，LED3 跟随下灯板或环境灯，LED2 跟随红光模式。
+ *
+ * @param manager 灯光管理器指针
+ */
+void light_manager_sync_indicator_leds(light_manager_t* manager);
+
+// =============================================================================
+// 状态查询
+// =============================================================================
+
+/**
+ * @brief 强制关闭所有灯光并重置状态
+ *
+ * 用于外部模块（如PIR超时）需要关闭所有灯光的场景，
+ * 会同步重置combo_state和red_mode等内部状态
+ *
+ * @param manager 灯光管理器指针
+ * @param use_fade 是否使用渐变效果
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t light_manager_turn_off_all(light_manager_t* manager, bool use_fade);
+
+/**
+ * @brief OTA升级前临时关闭硬件输出
+ *
+ * 仅关闭PWM输出、蜂鸣器和音频播放，不修改灯光开关状态、
+ * 红光模式、组合状态、NVS或MQTT状态。
+ *
+ * @param manager 灯光管理器指针
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t light_manager_suspend_outputs_for_ota(light_manager_t* manager);
+
+/**
+ * @brief 判断是否有任何灯开启（用于NVS生命周期管理）
+ *
+ * @param manager 灯光管理器指针
+ * @return true 有灯开启
+ * @return false 所有灯关闭
+ */
+bool light_manager_is_any_on(light_manager_t* manager);
+
+/**
+ * @brief 查询单个灯是否开启
+ *
+ * @param manager 灯光管理器指针
+ * @param light_id 灯光ID
+ * @return true 灯开启
+ * @return false 灯关闭
+ */
+bool light_manager_is_on(light_manager_t* manager, light_id_t light_id);
+
+/**
+ * @brief 获取单个灯的当前亮度百分比
+ *
+ * @param manager 灯光管理器指针
+ * @param light_id 灯光ID
+ * @return uint8_t 亮度百分比 (0-100)
+ */
+uint8_t light_manager_get_light_brightness(light_manager_t* manager, light_id_t light_id);
+
+// =============================================================================
+// MQTT协议接口 - 直接设置百分比亮度
+// =============================================================================
+
+/**
+ * @brief 设置指定灯光的百分比亮度并开关（MQTT协议使用）
+ *
+ * @param manager 灯光管理器指针
+ * @param light_id 灯光ID
