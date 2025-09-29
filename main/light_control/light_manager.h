@@ -359,3 +359,93 @@ uint8_t light_manager_get_light_brightness(light_manager_t* manager, light_id_t 
  *
  * @param manager 灯光管理器指针
  * @param light_id 灯光ID
+ * @param on 是否开启 (true/false)
+ * @param brightness_percent 亮度百分比 (1-100)，仅在on=true时生效
+ * @param use_fade 是否使用渐变
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t light_manager_set_light_state_percent(light_manager_t* manager,
+                                                 light_id_t light_id,
+                                                 bool on,
+                                                 uint8_t brightness_percent,
+                                                 bool use_fade);
+
+/**
+ * @brief 设置光疗红光模式（MQTT协议使用）
+ *
+ * @param manager 灯光管理器指针
+ * @param therapy_state 光疗状态: 0=关闭、1=护眼、2=专注、3=助眠
+ * @param brightness_normal 护眼模式亮度 (1-100)
+ * @param brightness_therapy 专注模式亮度 (1-100)
+ * @param brightness_sleep 助眠模式亮度 (1-100, 内部按20%上限缩放)
+ * @param use_fade 是否使用渐变
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t light_manager_set_therapy_state(light_manager_t* manager,
+                                           therapy_state_t therapy_state,
+                                           uint8_t brightness_normal,
+                                           uint8_t brightness_therapy,
+                                           uint8_t brightness_sleep,
+                                           bool use_fade);
+
+/**
+ * @brief 判断是否有面板灯（不含红光）开启
+ *
+ * 用于PIR判断是否需要激活，助眠模式单独开时不应激活PIR
+ *
+ * @param manager 灯光管理器指针
+ * @return true 有面板灯开启
+ * @return false 所有面板灯关闭
+ */
+bool light_manager_is_any_panel_on(light_manager_t* manager);
+
+// =============================================================================
+// 红光渐变闪烁功能（OTA升级视觉反馈）
+// =============================================================================
+
+/**
+ * @brief 启动红光渐变闪烁（呼吸效果）
+ *
+ * 用于OTA升级等需要视觉反馈的场景。
+ * 红光会以约2秒周期进行平滑呼吸式闪烁（使用正弦函数实现）。
+ *
+ * @param manager 灯光管理器指针
+ * @return esp_err_t ESP_OK成功，其他失败
+ *
+ * @note 闪烁期间会忽略其他红光控制命令
+ * @note 使用正常模式（5kHz PWM），不影响光疗设置
+ * @note 自动关闭蜂鸣器（如果开启）
+ */
+esp_err_t light_manager_start_red_blink(light_manager_t* manager);
+
+/**
+ * @brief 停止红光渐变闪烁
+ *
+ * 停止闪烁并关闭红光。
+ *
+ * @param manager 灯光管理器指针
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t light_manager_stop_red_blink(light_manager_t* manager);
+
+// =============================================================================
+// NVS存储（预留接口）
+// =============================================================================
+
+/**
+ * @brief 保存当前状态到NVS（预留，待用户提供键值对表）
+ *
+ * @param manager 灯光管理器指针
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t light_manager_save_state(light_manager_t* manager);
+
+/**
+ * @brief 从NVS加载状态（预留，待用户提供键值对表）
+ *
+ * @param manager 灯光管理器指针
+ * @return esp_err_t ESP_OK成功，其他失败
+ */
+esp_err_t light_manager_load_state(light_manager_t* manager);
+
+#endif // _LIGHT_MANAGER_H_
