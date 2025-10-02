@@ -180,3 +180,94 @@ static bool handle_therapy_param(const char* key, cJSON* value)
         return false;
     }
 
+    light_manager_t* light_mgr = get_light_manager();
+    if (light_mgr == NULL) {
+        ESP_LOGE(TAG, "无法获取light_manager实例");
+        return false;
+    }
+
+    ESP_LOGI(TAG, "处理therapy参数");
+
+    /* 解析state字段 */
+    cJSON* state_obj = cJSON_GetObjectItem(value, "state");
+    int state_val = -1;
+    if (state_obj) {
+        if (cJSON_IsString(state_obj))
+            state_val = atoi(state_obj->valuestring);
+        else if (cJSON_IsNumber(state_obj))
+            state_val = state_obj->valueint;
+    }
+
+    if (state_val < 0 || state_val > 3) {
+        ESP_LOGW(TAG, "  光疗模式值无效: %d", state_val);
+        return false;
+    }
+
+    ESP_LOGI(TAG, "  光疗模式: %d", state_val);
+
+    /* 解析brightness字段 */
+    cJSON* brightness = cJSON_GetObjectItem(value, "brightness");
+    int brightness_normal = 60;
+    int brightness_therapy = 60;
+    int brightness_sleep = 100;
+
+    if (brightness && cJSON_IsObject(brightness)) {
+        brightness_normal = get_json_int(brightness, "1", 60);
+        brightness_therapy = get_json_int(brightness, "2", 60);
+        brightness_sleep = get_json_int(brightness, "3", 100);
+    }
+
+    /* 获取当前状态 */
+    red_light_mode_t current_mode = light_manager_get_red_mode(light_mgr);
+    uint8_t current_bright_normal = light_manager_get_therapy_brightness(light_mgr, 0);
+    uint8_t current_bright_therapy = light_manager_get_therapy_brightness(light_mgr, 1);
+    uint8_t current_bright_sleep = light_manager_get_therapy_brightness(light_mgr, 2);
+
+    if (state_val != current_mode ||
+        brightness_normal != current_bright_normal ||
+        brightness_therapy != current_bright_therapy ||
+        brightness_sleep != current_bright_sleep)
+    {
+        ESP_LOGI(TAG,
+                 "  设置光疗: 模式=%d, 护眼=%d, 专注=%d, 助眠=%d (当前: 模式=%d, %d, %d, %d)",
+                 state_val, brightness_normal, brightness_therapy, brightness_sleep,
+                 current_mode, current_bright_normal, current_bright_therapy, current_bright_sleep);
+
+        brightness_change_source = BRIGHTNESS_CHANGE_SOURCE_REMOTE;
+        light_manager_set_therapy_state(light_mgr, (therapy_state_t)state_val,
+                                         brightness_normal, brightness_therapy,
+                                         brightness_sleep, true);
+        brightness_change_source = BRIGHTNESS_CHANGE_SOURCE_EXTERNAL;
+    }
+    else {
+        ESP_LOGD(TAG, "  光疗状态无变化，跳过");
+    }
+
+    light_manager_sync_indicator_leds(light_mgr);
+
+    return true;
+}
+
+/* ========================================================================== */
+/* 初始化                                                                      */
+/* ========================================================================== */
+
+esp_err_t light_param_handler_init(void)
+{
+    esp_err_t ret;
+
+    ret = param_handler_register("lighting", handle_lighting_param);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "注册lighting处理器失败");
+        return ret;
+    }
+
+    ret = param_handler_register("therapy", handle_therapy_param);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "注册therapy处理器失败");
+        return ret;
+    }
+
+    ESP_LOGI(TAG, "灯光参数处理器初始化完成");
+    return ESP_OK;
+}
