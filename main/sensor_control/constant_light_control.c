@@ -94,3 +94,98 @@ static float calculate_baseline(const float *samples, uint16_t count)
         return 0.0f;
     }
 
+    // 复制数组(避免修改原数据)
+    float sorted[CL_SAMPLE_COUNT];
+    memcpy(sorted, samples, sizeof(float) * count);
+
+    // 排序(冒泡排序)
+    for (int i = 0; i < count - 1; i++) {
+        for (int j = 0; j < count - i - 1; j++) {
+            if (sorted[j] > sorted[j + 1]) {
+                float temp = sorted[j];
+                sorted[j] = sorted[j + 1];
+                sorted[j + 1] = temp;
+            }
+        }
+    }
+
+    // 返回中位数
+    if (count % 2 == 0) {
+        return (sorted[count / 2 - 1] + sorted[count / 2]) / 2.0f;
+    } else {
+        return sorted[count / 2];
+    }
+}
+
+/**
+ * @brief 检查采样数据是否稳定(最后10个点在±10%容差内)
+ */
+static bool is_sampling_stable(const float *samples, uint16_t count, float baseline)
+{
+    if (baseline < 1.0f) {
+        return false; // 基准值太小,认为不稳定
+    }
+
+    float min = baseline * (1.0f - CL_BASELINE_TOLERANCE);
+    float max = baseline * (1.0f + CL_BASELINE_TOLERANCE);
+
+    int stable_samples = (count >= 10) ? 10 : count;
+    for (int i = count - stable_samples; i < count; i++) {
+        if (samples[i] < min || samples[i] > max) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/**
+ * @brief 计算需要调整的亮度档位
+ *
+ * 策略:
+ * - 只使用相对阈值15%判断,适应不同环境光强度
+ * - 差异>30%时跳2档,否则跳1档
+ */
+static brightness_level_t calculate_target_level(float current_lux,
+                                                  float baseline,
+                                                  brightness_level_t current_level)
+{
+    float diff = current_lux - baseline;
+    float diff_percent = fabs(diff / baseline) * 100.0f;
+
+    // 仅使用相对阈值判断(移除绝对阈值)
+    if (diff_percent < CL_RELATIVE_THRESHOLD) {
+        return current_level; // 保持不变
+    }
+
+    // 环境光过亮 → 降低灯光亮度
+    if (current_lux > baseline * (1.0f + CL_BASELINE_TOLERANCE)) {
+        if (diff_percent > CL_LARGE_CHANGE_THRESHOLD && current_level > BRIGHTNESS_LEVEL_40) {
+            return current_level - 2; // 降2档
+        } else if (current_level > BRIGHTNESS_LEVEL_10) {
+            return current_level - 1; // 降1档
+        }
+    }
+    // 环境光过暗 → 提高灯光亮度
+    else if (current_lux < baseline * (1.0f - CL_BASELINE_TOLERANCE)) {
+        if (diff_percent > CL_LARGE_CHANGE_THRESHOLD && current_level < BRIGHTNESS_LEVEL_80) {
+            return current_level + 2; // 升2档
+        } else if (current_level < BRIGHTNESS_LEVEL_100) {
+            return current_level + 1; // 升1档
+        }
+    }
+
+    return current_level;
+}
+
+/**
+ * @brief 检查是否有灯板(除红光)开启
+ */
+static bool is_any_panel_on(void)
+{
+    if (!cl_ctrl || !cl_ctrl->light_mgr) {
+        return false;
+    }
+
+    return light_manager_is_on(cl_ctrl->light_mgr, LIGHT_ID_AMBIENT) ||
+           light_manager_is_on(cl_ctrl->light_mgr, LIGHT_ID_LOWER) ||
+           light_manager_is_on(cl_ctrl->light_mgr, LIGHT_ID_UPPER);
