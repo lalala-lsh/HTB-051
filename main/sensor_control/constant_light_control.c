@@ -189,3 +189,99 @@ static bool is_any_panel_on(void)
     return light_manager_is_on(cl_ctrl->light_mgr, LIGHT_ID_AMBIENT) ||
            light_manager_is_on(cl_ctrl->light_mgr, LIGHT_ID_LOWER) ||
            light_manager_is_on(cl_ctrl->light_mgr, LIGHT_ID_UPPER);
+}
+
+/**
+ * @brief 采样定时器回调(每10秒读取一次BH1750)
+ */
+static void cl_sample_timer_callback(TimerHandle_t xTimer)
+{
+    if (!cl_ctrl || cl_ctrl->state != CL_STATE_SAMPLING) {
+        return;
+    }
+
+    // 读取BH1750数据
+    float lux = 0.0f;
+    esp_err_t ret = bh1750_get_data(&lux);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "读取BH1750失败,跳过本次采样");
+        return;
+    }
+
+    // 过滤异常值
+    if (lux < 0.0f || lux > 10000.0f) {
+        ESP_LOGW(TAG, "BH1750数据异常(%.2f lx),跳过", lux);
+        return;
+    }
+
+    // 存储采样值
+    cl_ctrl->sample_buffer[cl_ctrl->sample_index++] = lux;
+    // #region agent log (H1: 采样进度)
+    ESP_LOGI(TAG, "采样 %d/%d: %.2f lx", cl_ctrl->sample_index, CL_SAMPLE_COUNT, lux);
+    // #endregion
+
+    // 检查是否采样完成
+    if (cl_ctrl->sample_index >= CL_SAMPLE_COUNT) {
+        cl_ctrl->baseline_lux = calculate_baseline(cl_ctrl->sample_buffer, CL_SAMPLE_COUNT);
+
+        if (is_sampling_stable(cl_ctrl->sample_buffer, CL_SAMPLE_COUNT, cl_ctrl->baseline_lux)) {
+            // 采样完成,进入ACTIVE状态
+            cl_ctrl->state = CL_STATE_ACTIVE;
+            cl_ctrl->current_level = light_manager_get_brightness_level(cl_ctrl->light_mgr);
+            xTimerStop(cl_ctrl->sample_timer, 100);
+            xTimerStart(cl_ctrl->adjust_timer, 100);
+            ESP_LOGI(TAG, "基准值建立完成: %.2f lx (容差±%.1f%%)",
+                     cl_ctrl->baseline_lux, CL_BASELINE_TOLERANCE * 100.0f);
+        } else {
+            ESP_LOGW(TAG, "采样数据不稳定(基准%.2f lx),重新采样", cl_ctrl->baseline_lux);
+            cl_ctrl->sample_index = 0;
+        }
+    }
+}
+
+/**
+ * @brief 调节定时器回调(每5秒检测并调节亮度)
+ *
+ * 新增连续检测机制:连续3次检测到偏差才执行调节,避免误调节
+ */
+static void cl_adjust_timer_callback(TimerHandle_t xTimer)
+{
+    if (!cl_ctrl || cl_ctrl->state != CL_STATE_ACTIVE) {
+        return;
+    }
+
+    // 忽略计数递减
+    if (cl_ctrl->ignore_count > 0) {
+        cl_ctrl->ignore_count--;
+        ESP_LOGD(TAG, "忽略调节(锁定中,剩余%d周期)", cl_ctrl->ignore_count);
+        return;
+    }
+
+    // 读取当前光照强度
+    float current_lux = 0.0f;
+    if (bh1750_get_data(&current_lux) != ESP_OK || current_lux < 0.0f || current_lux > 10000.0f) {
+        ESP_LOGW(TAG, "读取BH1750失败或数据异常");
+        cl_ctrl->consistent_count = 0; // 读取失败,重置连续计数
+        return;
+    }
+
+    // 计算目标档位
+    brightness_level_t current_level = light_manager_get_brightness_level(cl_ctrl->light_mgr);
+    brightness_level_t target_level = calculate_target_level(current_lux, cl_ctrl->baseline_lux, current_level);
+    float diff_percent = ((current_lux - cl_ctrl->baseline_lux) / cl_ctrl->baseline_lux) * 100.0f;
+
+    // #region agent log (H1: 恒光调节活动)
+    ESP_LOGI(TAG, "[恒光监测] lux=%.1f, 基准=%.1f, 偏差=%+.1f%%, 档位=%d",
+             current_lux, cl_ctrl->baseline_lux, diff_percent, current_level);
+    // #endregion
+
+    // 检测到偏差(需要调节)
+    if (target_level != current_level) {
+        // 检查是否与上次目标档位一致
+        if (cl_ctrl->pending_target_level == target_level) {
+            // 连续检测到相同的偏差
+            cl_ctrl->consistent_count++;
+            ESP_LOGD(TAG, "[恒光检测] 光照偏差 %.2f lx vs 基准 %.2f lx (%+.1f%%), "
+                          "目标档位 %d→%d, 连续计数 %d/%d",
+                     current_lux, cl_ctrl->baseline_lux, diff_percent,
+                     current_level, target_level,
