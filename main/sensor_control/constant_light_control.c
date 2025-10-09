@@ -285,3 +285,99 @@ static void cl_adjust_timer_callback(TimerHandle_t xTimer)
                           "目标档位 %d→%d, 连续计数 %d/%d",
                      current_lux, cl_ctrl->baseline_lux, diff_percent,
                      current_level, target_level,
+                     cl_ctrl->consistent_count, CL_CONSISTENT_THRESHOLD);
+
+            // 达到连续阈值,执行调节
+            if (cl_ctrl->consistent_count >= CL_CONSISTENT_THRESHOLD) {
+                ESP_LOGI(TAG, "[恒光调节] 连续%d次检测到偏差,执行调节 %d→%d",
+                         CL_CONSISTENT_THRESHOLD, current_level, target_level);
+
+                // 调节亮度(设置来源标志,在sensor_control.c中声明)
+                brightness_change_source = BRIGHTNESS_CHANGE_SOURCE_CONSTANT_LIGHT;
+                light_manager_set_brightness_level(cl_ctrl->light_mgr, target_level);
+                brightness_change_source = BRIGHTNESS_CHANGE_SOURCE_EXTERNAL;
+
+                cl_ctrl->current_level = target_level;
+                cl_ctrl->stable_count = 0;
+                cl_ctrl->consistent_count = 0; // 重置连续计数
+                cl_ctrl->pending_target_level = BRIGHTNESS_LEVEL_MAX; // 重置待定目标
+                cl_ctrl->ignore_count = CL_IGNORE_CYCLES; // 锁定30秒
+            }
+        } else {
+            // 目标档位变化,重新开始计数
+            cl_ctrl->pending_target_level = target_level;
+            cl_ctrl->consistent_count = 1;
+            ESP_LOGD(TAG, "[恒光检测] 检测到新的偏差方向,重新计数: %.2f lx vs 基准 %.2f lx (%+.1f%%)",
+                     current_lux, cl_ctrl->baseline_lux, diff_percent);
+        }
+        cl_ctrl->stable_count = 0; // 重置稳定计数
+    } else {
+        // 在容差范围内,光照稳定
+        cl_ctrl->consistent_count = 0; // 重置连续计数
+        cl_ctrl->pending_target_level = BRIGHTNESS_LEVEL_MAX; // 重置待定目标
+        cl_ctrl->stable_count++;
+        ESP_LOGD(TAG, "[恒光稳定] 光照稳定在基准值附近 (稳定计数 %d/%d)",
+                 cl_ctrl->stable_count, CL_STABLE_THRESHOLD);
+    }
+}
+
+/**
+ * @brief 初始化恒光控制模块
+ */
+esp_err_t constant_light_init(void)
+{
+    if (cl_ctrl != NULL) {
+        ESP_LOGW(TAG, "恒光控制已初始化");
+        return ESP_OK;
+    }
+
+    // 分配控制结构(使用heap_caps_malloc从PSRAM分配)
+    cl_ctrl = heap_caps_malloc(sizeof(constant_light_control_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (cl_ctrl == NULL) {
+        ESP_LOGE(TAG, "分配内存失败");
+        return ESP_FAIL;
+    }
+
+    // 初始化结构
+    memset(cl_ctrl, 0, sizeof(constant_light_control_t));
+    cl_ctrl->state = CL_STATE_IDLE;
+    cl_ctrl->enabled = (device_params_get_constant_light_state() == 1); // 从NVS读取
+    cl_ctrl->baseline_tolerance = CL_BASELINE_TOLERANCE;
+    cl_ctrl->light_mgr = get_light_manager();
+    cl_ctrl->pending_target_level = BRIGHTNESS_LEVEL_MAX; // 初始化为无效值
+
+    // 创建采样定时器(10秒周期)
+    cl_ctrl->sample_timer = xTimerCreate(
+        "cl_sample",                      // 定时器名称
+        pdMS_TO_TICKS(CL_SAMPLE_INTERVAL_MS), // 周期
+        pdTRUE,                           // 自动重载
+        NULL,                             // 定时器ID
+        cl_sample_timer_callback          // 回调函数
+    );
+    if (cl_ctrl->sample_timer == NULL) {
+        ESP_LOGE(TAG, "创建采样定时器失败");
+        heap_caps_free(cl_ctrl);
+        cl_ctrl = NULL;
+        return ESP_FAIL;
+    }
+
+    // 创建调节定时器(5秒周期)
+    cl_ctrl->adjust_timer = xTimerCreate(
+        "cl_adjust",                      // 定时器名称
+        pdMS_TO_TICKS(CL_ADJUST_INTERVAL_MS), // 周期
+        pdTRUE,                           // 自动重载
+        NULL,                             // 定时器ID
+        cl_adjust_timer_callback          // 回调函数
+    );
+    if (cl_ctrl->adjust_timer == NULL) {
+        ESP_LOGE(TAG, "创建调节定时器失败");
+        xTimerDelete(cl_ctrl->sample_timer, 100);
+        heap_caps_free(cl_ctrl);
+        cl_ctrl = NULL;
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "恒光控制初始化成功(功能%s)", cl_ctrl->enabled ? "启用" : "禁用");
+    return ESP_OK;
+}
+
