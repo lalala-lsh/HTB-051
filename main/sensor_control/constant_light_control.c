@@ -381,3 +381,98 @@ esp_err_t constant_light_init(void)
     return ESP_OK;
 }
 
+/**
+ * @brief 更新恒光控制状态
+ */
+void constant_light_update_state(void)
+{
+    if (!cl_ctrl || !cl_ctrl->enabled) {
+        return;
+    }
+
+    bool panels_on = is_any_panel_on();
+
+    switch (cl_ctrl->state) {
+    case CL_STATE_IDLE:
+        // 有灯板开启 → 启动采样
+        if (panels_on) {
+            cl_ctrl->state = CL_STATE_SAMPLING;
+            cl_ctrl->sample_index = 0;
+            cl_ctrl->sample_start_time = xTaskGetTickCount();
+            xTimerStart(cl_ctrl->sample_timer, 100);
+            ESP_LOGI(TAG, "启动恒光控制(采样5分钟建立基准值)");
+        }
+        break;
+
+    case CL_STATE_SAMPLING:
+    case CL_STATE_ACTIVE:
+        // 所有灯板关闭 → 回到IDLE
+        if (!panels_on) {
+            xTimerStop(cl_ctrl->sample_timer, 100);
+            xTimerStop(cl_ctrl->adjust_timer, 100);
+            cl_ctrl->state = CL_STATE_IDLE;
+            cl_ctrl->sample_index = 0;
+            cl_ctrl->stable_count = 0;
+            cl_ctrl->ignore_count = 0;
+            cl_ctrl->consistent_count = 0; // 重置连续检测计数
+            cl_ctrl->pending_target_level = BRIGHTNESS_LEVEL_MAX; // 重置待定目标
+            ESP_LOGI(TAG, "停止恒光控制(所有灯板关闭)");
+        }
+        break;
+
+    case CL_STATE_SUSPENDED:
+        // 所有灯板关闭 → 回到IDLE
+        if (!panels_on) {
+            xTimerStop(cl_ctrl->adjust_timer, 100);
+            cl_ctrl->state = CL_STATE_IDLE;
+            cl_ctrl->consistent_count = 0; // 重置连续检测计数
+            cl_ctrl->pending_target_level = BRIGHTNESS_LEVEL_MAX; // 重置待定目标
+            ESP_LOGI(TAG, "停止恒光控制(所有灯板关闭)");
+        }
+        break;
+
+    default:
+        break;
+    }
+}
+
+/**
+ * @brief 外部灯光变化通知
+ */
+void constant_light_on_light_change_external(void)
+{
+    if (!cl_ctrl || !cl_ctrl->enabled) {
+        return;
+    }
+
+    // 如果在ACTIVE状态,重新采样建立基准值(因为外部改变了亮度)
+    if (cl_ctrl->state == CL_STATE_ACTIVE) {
+        cl_ctrl->state = CL_STATE_SAMPLING;
+        cl_ctrl->sample_index = 0;
+        cl_ctrl->sample_start_time = xTaskGetTickCount();
+        cl_ctrl->consistent_count = 0; // 重置连续检测计数
+        cl_ctrl->pending_target_level = BRIGHTNESS_LEVEL_MAX; // 重置待定目标
+        xTimerStop(cl_ctrl->adjust_timer, 100);
+        xTimerStart(cl_ctrl->sample_timer, 100);
+        ESP_LOGI(TAG, "外部灯光变化,重新采样建立基准值");
+    }
+}
+
+/**
+ * @brief 暂停恒光控制(PIR调暗时调用)
+ */
+void constant_light_suspend(void)
+{
+    if (!cl_ctrl || !cl_ctrl->enabled) {
+        return;
+    }
+
+    // #region agent log
+    ESP_LOGI(TAG, "[suspend] 当前state=%d (0=IDLE,1=SAMPLING,2=ACTIVE,3=SUSPENDED)",
+             cl_ctrl->state);
+    // #endregion
+
+    if (cl_ctrl->state == CL_STATE_ACTIVE) {
+        cl_ctrl->state = CL_STATE_SUSPENDED;
+        cl_ctrl->consistent_count = 0;
+        cl_ctrl->pending_target_level = BRIGHTNESS_LEVEL_MAX;
