@@ -476,3 +476,99 @@ void constant_light_suspend(void)
         cl_ctrl->state = CL_STATE_SUSPENDED;
         cl_ctrl->consistent_count = 0;
         cl_ctrl->pending_target_level = BRIGHTNESS_LEVEL_MAX;
+        xTimerStop(cl_ctrl->adjust_timer, 100);
+        ESP_LOGI(TAG, "恒光控制暂停(PIR调暗) [ACTIVE→SUSPENDED]");
+    } else if (cl_ctrl->state == CL_STATE_SAMPLING) {
+        cl_ctrl->state = CL_STATE_SUSPENDED;
+        xTimerStop(cl_ctrl->sample_timer, 100);
+        cl_ctrl->sample_index = 0;
+        ESP_LOGI(TAG, "恒光控制暂停(PIR调暗) [SAMPLING→SUSPENDED,采样重置]");
+    }
+}
+
+/**
+ * @brief 恢复恒光控制(PIR恢复后调用)
+ */
+void constant_light_resume(void)
+{
+    if (!cl_ctrl || !cl_ctrl->enabled) {
+        return;
+    }
+
+    if (cl_ctrl->state == CL_STATE_SUSPENDED) {
+        // 重新采样(因为亮度已被PIR改变)
+        cl_ctrl->state = CL_STATE_SAMPLING;
+        cl_ctrl->sample_index = 0;
+        cl_ctrl->sample_start_time = xTaskGetTickCount();
+        cl_ctrl->consistent_count = 0; // 重置连续检测计数
+        cl_ctrl->pending_target_level = BRIGHTNESS_LEVEL_MAX; // 重置待定目标
+        xTimerStart(cl_ctrl->sample_timer, 100);
+        ESP_LOGI(TAG, "恒光控制恢复,重新采样建立基准值");
+    }
+}
+
+/**
+ * @brief 销毁恒光控制模块
+ */
+esp_err_t constant_light_deinit(void)
+{
+    if (cl_ctrl == NULL) {
+        return ESP_OK;
+    }
+
+    // 停止定时器
+    if (cl_ctrl->sample_timer) {
+        xTimerStop(cl_ctrl->sample_timer, 100);
+        xTimerDelete(cl_ctrl->sample_timer, 100);
+    }
+    if (cl_ctrl->adjust_timer) {
+        xTimerStop(cl_ctrl->adjust_timer, 100);
+        xTimerDelete(cl_ctrl->adjust_timer, 100);
+    }
+
+    // 释放内存
+    heap_caps_free(cl_ctrl);
+    cl_ctrl = NULL;
+
+    ESP_LOGI(TAG, "恒光控制销毁");
+    return ESP_OK;
+}
+
+/**
+ * @brief 设置恒光控制功能启用状态
+ */
+void constant_light_set_enabled(bool enabled)
+{
+    if (!cl_ctrl) {
+        return;
+    }
+
+    if (cl_ctrl->enabled == enabled) {
+        return; // 状态无变化
+    }
+
+    cl_ctrl->enabled = enabled;
+    ESP_LOGI(TAG, "恒光控制%s(下次灯光开启时生效)", enabled ? "已启用" : "已禁用");
+
+    // 注意:按照需求,配置保存后下次灯光开启时生效
+    // 这里不立即停止当前运行的恒光控制,让它自然在灯关闭时停止
+}
+
+/**
+ * @brief 获取恒光控制功能启用状态
+ */
+bool constant_light_get_enabled(void)
+{
+    if (!cl_ctrl) {
+        return false;
+    }
+    return cl_ctrl->enabled;
+}
+
+// #region agent log (H1: 调试用——获取恒光状态)
+int constant_light_get_state(void)
+{
+    if (!cl_ctrl) return -1;
+    return (int)cl_ctrl->state;
+}
+// #endregion
