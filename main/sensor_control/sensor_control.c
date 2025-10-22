@@ -87,3 +87,92 @@ static void reset_pir_control_state(const char* reason) {
     memory_brightness_level = BRIGHTNESS_LEVEL_MAX;
     pir_ignore_count = 0;
 
+    ESP_LOGI(TAG, "%s，停止定时休息定时器并重置状态", reason);
+}
+
+static void pir_log_record(int gpio_level) {
+    time_t now;
+    struct tm timeinfo;
+    time(&now);
+    localtime_r(&now, &timeinfo);
+    int year  = (timeinfo.tm_year + 1900) % 10000;
+    int month = (timeinfo.tm_mon + 1) % 100;
+    int day   = timeinfo.tm_mday % 100;
+    int hour  = timeinfo.tm_hour % 100;
+    int min   = timeinfo.tm_min  % 100;
+    int sec   = timeinfo.tm_sec  % 100;
+    snprintf(pir_log_entries[pir_log_write_index], PIR_LOG_ENTRY_SIZE,
+             "%04d%02d%02d%02d%02d%02d %d",
+             year, month, day, hour, min, sec, gpio_level & 1);
+    pir_log_write_index = (pir_log_write_index + 1) % PIR_LOG_BUFFER_SIZE;
+    if (pir_log_count < PIR_LOG_BUFFER_SIZE) {
+        pir_log_count++;
+    }
+}
+
+/**
+ * @brief 检查是否检测到人体运动
+ *
+ * 正常阶段: 单次轮询
+ * 调暗阶段: 快速多次采样(5次/250ms)，捕获短脉冲
+ */
+static bool pir_is_motion_detected(bool poll_state) {
+    if (poll_state == PIR_MOTION_DETECTED) return true;
+    if (!is_dimmed) return false;
+    for (int i = 0; i < 5; i++) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+        if (gpio_get_level(PIR_IO_NUM) == 0) return true;
+    }
+    return false;
+}
+
+/**
+ * @brief 灯光状态变化回调
+ *
+ * 当按键触发灯光开关或亮度变化时，重置PIR定时器
+ */
+static void on_light_change(light_change_type_t change_type, int light_id,
+                            void* arg) {
+    // #region agent log (H6: 追踪所有灯光回调)
+    if (pir_control_flag) {
+        ESP_LOGI(TAG, "[回调] type=%d, light=%d, src=%d, dimmed=%d, ignore=%d",
+                 change_type, light_id, brightness_change_source,
+                 is_dimmed, pir_ignore_count);
+    }
+    // #endregion
+
+    /* MQTT同步策略:
+     * 1. 本地按键控制 - 总是同步
+     * 2. 恒光控制调节亮度 - 总是同步
+     * 3. PIR调暗到10% - 不同步
+     * 4. PIR超时关灯 - 在pir_control_flag=false时通过LIGHT_CHANGE_OFF同步
+     * 5. 远端MQTT控制(CMD 209) - 不同步(服务器已知晓参数)
+     */
+    bool should_sync_mqtt = false;
+
+    if (brightness_change_source == BRIGHTNESS_CHANGE_SOURCE_EXTERNAL) {
+        /* 本地按键控制,总是同步 */
+        should_sync_mqtt = true;
+    }
+    else if (brightness_change_source == BRIGHTNESS_CHANGE_SOURCE_REMOTE) {
+        /* 远端MQTT控制(CMD 209),不需要发送CMD 7同步 */
+        should_sync_mqtt = false;
+    }
+    else if (brightness_change_source ==
+             BRIGHTNESS_CHANGE_SOURCE_CONSTANT_LIGHT)
+    {
+        /* 恒光控制调节亮度,总是同步 */
+        should_sync_mqtt = true;
+    }
+    else if (brightness_change_source == BRIGHTNESS_CHANGE_SOURCE_PIR) {
+        /* PIR调暗亮度,不同步MQTT */
+        should_sync_mqtt = false;
+    }
+    else if (!pir_control_flag && change_type == LIGHT_CHANGE_OFF) {
+        /* PIR超时关灯(pir_control_flag已被重置为false),需要同步 */
+        should_sync_mqtt = true;
+    }
+
+    if (should_sync_mqtt) {
+        mqtt_notify_light_change();
+    }
