@@ -176,3 +176,92 @@ static void on_light_change(light_change_type_t change_type, int light_id,
     if (should_sync_mqtt) {
         mqtt_notify_light_change();
     }
+
+    /* 以下是PIR定时器控制逻辑 */
+
+    /* 仅本地按键和远端MQTT控制需要处理PIR定时器，忽略PIR和恒光内部调用 */
+    if (brightness_change_source != BRIGHTNESS_CHANGE_SOURCE_EXTERNAL &&
+        brightness_change_source != BRIGHTNESS_CHANGE_SOURCE_REMOTE) {
+        return;
+    }
+
+    /* PIR控制未激活时不处理PIR逻辑 */
+    if (!pir_control_flag) {
+        return;
+    }
+
+    ESP_LOGI(TAG, "检测到灯光变化(type=%d, light=%d)，重置定时器", change_type,
+             light_id);
+
+    /* 处理关灯事件：检查是否所有灯都关闭 */
+    if (change_type == LIGHT_CHANGE_OFF) {
+        /* 检查是否所有灯都已关闭 */
+        if (!light_manager_is_any_on(get_light_manager())) {
+            reset_pir_control_state("所有灯已关闭");
+            return;
+        }
+        /* 还有灯开着，继续重置定时器 */
+    }
+
+    if (is_dimmed) {
+        /* 调暗阶段：恢复亮度，停止off定时器，重启dim定时器 */
+        xTimerStop(off_timeout_handle, 100);
+
+        /* 先恢复临时调暗前每盏灯各自保存的亮度 */
+        brightness_change_source = BRIGHTNESS_CHANGE_SOURCE_PIR;
+        light_manager_restore_saved_brightness(get_light_manager());
+        brightness_change_source = BRIGHTNESS_CHANGE_SOURCE_EXTERNAL;
+
+        constant_light_resume();
+
+        is_dimmed = false;
+        /* 重新读取亮度 */
+        memory_brightness_level =
+            light_manager_get_brightness_level(get_light_manager());
+        xTimerReset(dim_timeout_handle, 100);
+        ESP_LOGI(TAG, "调暗阶段检测到操作，恢复各灯保存亮度并重启dim定时器(level=%d)",
+                 memory_brightness_level);
+    }
+    else {
+        /* 正常阶段：只更新亮度记忆，不重置dim定时器（用灯计时，到时提醒休息） */
+        if (change_type == LIGHT_CHANGE_BRIGHTNESS) {
+            memory_brightness_level =
+                light_manager_get_brightness_level(get_light_manager());
+        }
+        ESP_LOGI(TAG, "正常阶段检测到按键操作，更新亮度记忆(dim定时器继续计时)");
+    }
+
+    /* 通知恒光控制外部亮度变化,触发重新采样 */
+    constant_light_on_light_change_external();
+}
+
+static void dim_timeout_timer_callback(TimerHandle_t xTimer) {
+    /* 专注模式不受定时休息控制：面板灯保持原样，音乐不中断 */
+    red_light_mode_t dim_red_mode = light_manager_get_red_mode(get_light_manager());
+    if (dim_red_mode == RED_LIGHT_MODE_THERAPY) {
+        ESP_LOGI(TAG, "专注模式运行中，跳过定时休息调暗，重置dim定时器");
+        xTimerReset(dim_timeout_handle, 0);
+        return;
+    }
+
+    // 记忆当前亮度档位（用于恢复）
+    memory_brightness_level =
+        light_manager_get_brightness_level(get_light_manager());
+
+    /* 标记为PIR内部调用，避免回调循环 */
+    brightness_change_source = BRIGHTNESS_CHANGE_SOURCE_PIR;
+
+    // 使用临时亮度接口（不修改保存的brightness值）
+    light_manager_set_temporary_brightness_level(get_light_manager(),
+                                                 BRIGHTNESS_LEVEL_10);
+
+    brightness_change_source = BRIGHTNESS_CHANGE_SOURCE_EXTERNAL;
+
+    /* 暂停恒光控制(PIR调暗阶段) */
+    constant_light_suspend();
+
+    xTimerStart(off_timeout_handle, 100);
+
+    /* 标记进入调暗阶段 */
+    is_dimmed = true;
+
