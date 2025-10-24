@@ -265,3 +265,91 @@ static void dim_timeout_timer_callback(TimerHandle_t xTimer) {
     /* 标记进入调暗阶段 */
     is_dimmed = true;
 
+    /* 设置忽略计数，防止亮度变化触发误检测 */
+    pir_ignore_count = PIR_IGNORE_CYCLES;
+
+    audio_queue_stop();
+    audio_queue_play(TURN_OFF, AUDIO_TYPE_FUNCTION, AUDIO_PRIORITY_HIGH, false);
+    // #region agent log (H1/H3)
+    extern int constant_light_get_state(void);
+    ESP_LOGI(TAG, "亮度临时调暗到10%%, memory_level=%d, 锁定%d个周期, 恒光state=%d",
+             memory_brightness_level, PIR_IGNORE_CYCLES,
+             constant_light_get_state());
+    // #endregion
+}
+
+static void off_timeout_timer_callback(TimerHandle_t xTimer) {
+    /* 先重置PIR控制状态，避免回调重启定时器 */
+    pir_control_flag = false;
+    is_dimmed = false;
+    memory_brightness_level = BRIGHTNESS_LEVEL_MAX;
+    pir_ignore_count = 0;
+
+    light_manager_t* lm = get_light_manager();
+    red_light_mode_t red_mode = light_manager_get_red_mode(lm);
+
+    if (red_mode == RED_LIGHT_MODE_SLEEP) {
+        /* 助眠模式运行中：只关闭面板灯，保留助眠红光 */
+        light_manager_set_light_state_percent(lm, LIGHT_ID_UPPER, false, 0, true);
+        light_manager_set_light_state_percent(lm, LIGHT_ID_LOWER, false, 0, true);
+        light_manager_set_light_state_percent(lm, LIGHT_ID_AMBIENT, false, 0, true);
+        light_manager_reset_combo_state(lm);
+        ESP_LOGI(TAG, "PIR超时，关闭面板灯（保留助眠红光）");
+    } else if (red_mode == RED_LIGHT_MODE_THERAPY) {
+        /* 专注模式运行中：不关任何灯（由专注模式30分钟定时器统一管理） */
+        ESP_LOGI(TAG, "专注模式运行中，跳过PIR关灯");
+    } else {
+        light_manager_turn_off_all(lm, true);
+        ESP_LOGI(TAG, "PIR超时，关闭所有灯光并复位状态");
+    }
+}
+
+void sensor_control_task(void* pvParameters) {
+    pir_state_t current_pir_state;
+
+    while (1) {
+        /* 每秒记录PIR GPIO电平到环形缓冲区（无论PIR是否启用） */
+        pir_log_record(gpio_get_level(PIR_IO_NUM));
+
+        /* PIR功能禁用时,仅更新恒光控制 */
+        if (!pir_enabled) {
+            constant_light_update_state();
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        light_manager_t* lm = get_light_manager();
+        bool panel_on = light_manager_is_any_panel_on(lm);
+        red_light_mode_t red_mode = light_manager_get_red_mode(lm);
+        bool eye_mode_on = (red_mode == RED_LIGHT_MODE_NORMAL);
+        bool rest_timer_should_run = panel_on || eye_mode_on;
+
+        /* 面板灯或护眼模式开启，启动定时休息流程 */
+        if (rest_timer_should_run && !pir_control_flag) {
+            ESP_LOGI(TAG, "开启dim定时器(panel_on=%d, eye_mode_on=%d)",
+                     panel_on, eye_mode_on);
+            pir_control_flag = true;
+            memory_brightness_level =
+                light_manager_get_brightness_level(lm);
+            xTimerStart(dim_timeout_handle, 100);
+        }
+        else if (!rest_timer_should_run && pir_control_flag) {
+            reset_pir_control_state("面板灯关闭且未处于护眼模式");
+        }
+
+        if (pir_control_flag) {
+            current_pir_state = pir_get_state();
+            // ESP_LOGI(TAG, "PIR IO:%d, pir_state:%d, is_dimmed:%d",
+            //          gpio_get_level(PIR_IO_NUM), current_pir_state, is_dimmed);
+
+            /* 锁定期间递减计数，跳过PIR检测 */
+            if (pir_ignore_count > 0) {
+                pir_ignore_count--;
+                ESP_LOGI(TAG, "PIR检测锁定中，剩余%d个周期", pir_ignore_count);
+                vTaskDelay(pdMS_TO_TICKS(1000));
+                continue;
+            }
+
+            /* 检测到运动 */
+            if (pir_is_motion_detected(current_pir_state)) {
+                if (is_dimmed) {
