@@ -353,3 +353,92 @@ void sensor_control_task(void* pvParameters) {
             /* 检测到运动 */
             if (pir_is_motion_detected(current_pir_state)) {
                 if (is_dimmed) {
+                    // #region agent log (H3/H4/H5)
+                    ESP_LOGI(TAG, "[PIR恢复] 开始: memory_level=%d, pir_ctrl=%d, IO=%d",
+                             memory_brightness_level, pir_control_flag,
+                             gpio_get_level(PIR_IO_NUM));
+                    // #endregion
+
+                    /* 调暗阶段：恢复亮度，停止off定时器，重启dim定时器 */
+                    xTimerStop(off_timeout_handle, 100);
+
+                    /* 标记为PIR内部调用，避免回调循环 */
+                    brightness_change_source = BRIGHTNESS_CHANGE_SOURCE_PIR;
+                    esp_err_t restore_ret =
+                        light_manager_restore_saved_brightness(get_light_manager());
+                    brightness_change_source =
+                        BRIGHTNESS_CHANGE_SOURCE_EXTERNAL;
+
+                    // #region agent log (H4)
+                    if (restore_ret != ESP_OK) {
+                        ESP_LOGE(TAG, "[PIR恢复] 亮度恢复失败! ret=%s, level=%d",
+                                 esp_err_to_name(restore_ret), memory_brightness_level);
+                    }
+                    // #endregion
+
+                    // #region agent log (H4/H6: LEDC duty验证)
+                    {
+                        extern uint32_t ledc_get_duty(ledc_mode_t, ledc_channel_t);
+                        ESP_LOGI(TAG, "[PIR恢复] 恢复后LEDC duty: ambient=%lu, lower=%lu, upper=%lu, red=%lu",
+                                 ledc_get_duty(LEDC_LOW_SPEED_MODE, AMBIENT_LIGHT_CHANNEL),
+                                 ledc_get_duty(LEDC_LOW_SPEED_MODE, LOWER_LIGHT_CHANNEL),
+                                 ledc_get_duty(LEDC_LOW_SPEED_MODE, UPPER_LIGHT_CHANNEL),
+                                 ledc_get_duty(LEDC_LOW_SPEED_MODE, LED_R_CHANNEL));
+                    }
+                    // #endregion
+
+                    /* 如果红光模式有开（非助眠、非专注），恢复音乐播放 */
+                    red_light_mode_t red_mode =
+                        light_manager_get_red_mode(get_light_manager());
+                    if (red_mode != RED_LIGHT_MODE_OFF &&
+                        red_mode != RED_LIGHT_MODE_SLEEP &&
+                        red_mode != RED_LIGHT_MODE_THERAPY) {
+                        audio_queue_play_loop(MUSIC, AUDIO_TYPE_MUSIC_CTRL,
+                                              AUDIO_PRIORITY_LOW);
+                    }
+
+                    /* 恢复恒光控制(重新采样) */
+                    constant_light_resume();
+
+                    is_dimmed = false;
+                    xTimerReset(dim_timeout_handle, 100);
+                    ESP_LOGI(TAG, "调暗阶段检测到运动，恢复各灯保存亮度(level=%d, ret=%s)",
+                             memory_brightness_level, esp_err_to_name(restore_ret));
+                }
+                else {
+                    /* 正常阶段：不重置dim定时器（用灯计时，到时提醒休息） */
+                    ESP_LOGD(TAG, "正常阶段检测到运动，dim定时器继续计时");
+                }
+            }
+        }
+
+        /* 更新恒光控制状态 */
+        constant_light_update_state();
+
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+void sensor_control_init(void) {
+    /* 读取PIR启用状态 */
+    pir_enabled = (device_params_get_pir_state() == 1);
+    ESP_LOGI(TAG, "PIR功能%s", pir_enabled ? "已启用" : "已禁用");
+
+    esp_err_t ret = pir_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "PIR初始化失败: %s", esp_err_to_name(ret));
+        return;
+    }
+
+    /* 初始化BH1750传感器 */
+    ret = bh1750_power_on();
+    if (ret == ESP_OK) {
+        ret = bh1750_set_measure_mode(BH1750_CONTINUE_1LX_RES);
+        if (ret == ESP_OK) {
+            ESP_LOGI(TAG, "BH1750初始化成功(连续高分辨率模式)");
+        }
+        else {
+            ESP_LOGE(TAG, "BH1750设置测量模式失败");
+        }
+    }
+    else {
