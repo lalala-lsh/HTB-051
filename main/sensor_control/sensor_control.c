@@ -442,3 +442,92 @@ void sensor_control_init(void) {
         }
     }
     else {
+        ESP_LOGE(TAG, "BH1750上电失败");
+    }
+
+    dim_timeout_handle =
+        xTimerCreate("dim_timeout_timer", pdMS_TO_TICKS(DIM_TIMEOUT_TIMEOUT_MS),
+                     pdFALSE, NULL, dim_timeout_timer_callback);
+    if (dim_timeout_handle == NULL) {
+        ESP_LOGE(TAG, "创建dim_timeout定时器失败");
+        return;
+    }
+
+    off_timeout_handle =
+        xTimerCreate("off_timeout_timer", pdMS_TO_TICKS(OFF_TIMEOUT_TIMEOUT_MS),
+                     pdFALSE, NULL, off_timeout_timer_callback);
+    if (off_timeout_handle == NULL) {
+        ESP_LOGE(TAG, "创建off_timeout定时器失败");
+        xTimerDelete(dim_timeout_handle, 100);
+        return;
+    }
+
+    ESP_LOGI(TAG, "创建定时器成功：");
+    ESP_LOGI(TAG, "\t- dim_timeout_timer: %d ms", DIM_TIMEOUT_TIMEOUT_MS);
+    ESP_LOGI(TAG, "\t- off_timeout_timer: %d ms", OFF_TIMEOUT_TIMEOUT_MS);
+
+    /* 初始化恒光控制 */
+    ret = constant_light_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "恒光控制初始化失败");
+    }
+
+    /* 注册灯光状态变化回调 */
+    ret = light_manager_register_change_callback(get_light_manager(),
+                                                 on_light_change, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "注册灯光变化回调失败");
+    }
+
+    BaseType_t task_result = xTaskCreate(sensor_control_task, "sensor_control",
+                                         4096, NULL, 9, &sensor_control_handle);
+    if (task_result != pdPASS) {
+        ESP_LOGE(TAG, "创建传感器控制任务失败");
+        xTimerDelete(dim_timeout_handle, 100);
+        xTimerDelete(off_timeout_handle, 100);
+    }
+    else {
+        ESP_LOGI(TAG, "传感器控制任务创建成功");
+    }
+}
+
+/**
+ * @brief 设置PIR功能启用状态
+ */
+void sensor_control_set_pir_enabled(bool enabled) {
+    if (pir_enabled == enabled) {
+        return;
+    }
+
+    pir_enabled = enabled;
+
+    if (!enabled && pir_control_flag) {
+        /* 关闭PIR时，如果PIR控制正在运行，立即停止定时器 */
+        xTimerStop(dim_timeout_handle, 100);
+        xTimerStop(off_timeout_handle, 100);
+
+        /* 如果处于调暗阶段，恢复亮度 */
+        if (is_dimmed) {
+            brightness_change_source = BRIGHTNESS_CHANGE_SOURCE_PIR;
+            light_manager_restore_saved_brightness(get_light_manager());
+            brightness_change_source = BRIGHTNESS_CHANGE_SOURCE_EXTERNAL;
+            constant_light_resume();
+        }
+
+        pir_control_flag = false;
+        is_dimmed = false;
+        memory_brightness_level = BRIGHTNESS_LEVEL_MAX;
+        pir_ignore_count = 0;
+        ESP_LOGI(TAG, "PIR功能已禁用，停止定时器并恢复状态");
+    }
+    else {
+        ESP_LOGI(TAG, "PIR功能%s", enabled ? "已启用" : "已禁用");
+    }
+}
+
+/**
+ * @brief 获取PIR功能启用状态
+ */
+bool sensor_control_get_pir_enabled(void) {
+    return pir_enabled;
+}
