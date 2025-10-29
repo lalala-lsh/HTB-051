@@ -531,3 +531,92 @@ void sensor_control_set_pir_enabled(bool enabled) {
 bool sensor_control_get_pir_enabled(void) {
     return pir_enabled;
 }
+
+/**
+ * @brief 设置dim_timeout定时器时长
+ */
+void sensor_control_set_dim_timeout(uint8_t minutes) {
+    if (minutes < 1 || minutes > 45) {
+        ESP_LOGW(TAG, "dim_timeout超出范围(1-45): %d", minutes);
+        return;
+    }
+
+    if (dim_timeout_handle == NULL) {
+        ESP_LOGW(TAG, "dim_timeout定时器未初始化");
+        return;
+    }
+
+    uint32_t period_ms = minutes * 60 * 1000;
+    if (xTimerChangePeriod(dim_timeout_handle, pdMS_TO_TICKS(period_ms), 100) ==
+        pdPASS)
+    {
+        /* xTimerChangePeriod会自动启动定时器，仅在PIR激活且未调暗时才允许运行 */
+        if (!pir_control_flag || is_dimmed) {
+            xTimerStop(dim_timeout_handle, 100);
+        }
+        ESP_LOGI(TAG, "dim_timeout更新为%d分钟", minutes);
+    }
+    else {
+        ESP_LOGE(TAG, "设置dim_timeout失败");
+    }
+}
+
+/**
+ * @brief 设置off_timeout定时器时长
+ */
+void sensor_control_set_off_timeout(uint8_t minutes) {
+    if (minutes < 1 || minutes > 10) {
+        ESP_LOGW(TAG, "off_timeout超出范围(1-10): %d", minutes);
+        return;
+    }
+
+    if (off_timeout_handle == NULL) {
+        ESP_LOGW(TAG, "off_timeout定时器未初始化");
+        return;
+    }
+
+    uint32_t period_ms = minutes * 60 * 1000;
+    if (xTimerChangePeriod(off_timeout_handle, pdMS_TO_TICKS(period_ms), 100) ==
+        pdPASS)
+    {
+        /* xTimerChangePeriod会自动启动定时器，仅在已调暗阶段才允许运行 */
+        if (!is_dimmed) {
+            xTimerStop(off_timeout_handle, 100);
+        }
+        ESP_LOGI(TAG, "off_timeout更新为%d分钟", minutes);
+    }
+    else {
+        ESP_LOGE(TAG, "设置off_timeout失败");
+    }
+}
+
+/**
+ * @brief 查询PIR是否处于调暗状态
+ */
+bool sensor_control_is_pir_dimmed(void) {
+    return is_dimmed;
+}
+
+/* ========== PIR日志缓冲区对外接口 ========== */
+
+void pir_log_clear(void) {
+    pir_log_write_index = 0;
+    pir_log_count = 0;
+    memset(pir_log_entries, 0, sizeof(pir_log_entries));
+    ESP_LOGI(TAG, "PIR日志缓冲区已清空");
+}
+
+cJSON* pir_log_get_json_array(void) {
+    cJSON* array = cJSON_CreateArray();
+    if (!array) return NULL;
+
+    if (pir_log_count == 0) return array;
+
+    int start = (pir_log_count < PIR_LOG_BUFFER_SIZE) ? 0 : pir_log_write_index;
+    for (int i = 0; i < pir_log_count; i++) {
+        int idx = (start + i) % PIR_LOG_BUFFER_SIZE;
+        cJSON_AddItemToArray(array, cJSON_CreateString(pir_log_entries[idx]));
+    }
+
+    return array;
+}
