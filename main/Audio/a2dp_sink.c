@@ -96,3 +96,101 @@ static void bt_app_gap_cb(esp_bt_gap_cb_event_t event, esp_bt_gap_cb_param_t *pa
             break;
 
         case ESP_BT_GAP_ACL_CONN_CMPL_STAT_EVT:
+            ESP_LOGI(TAG, "ACL connection complete: status=%d", param->acl_conn_cmpl_stat.stat);
+            break;
+
+        case ESP_BT_GAP_ACL_DISCONN_CMPL_STAT_EVT:
+            ESP_LOGI(TAG, "ACL disconnection complete");
+            break;
+
+        default:
+            break;
+    }
+}
+
+/**
+ * @brief A2DP 连接状态回调
+ */
+static void bt_app_a2d_cb(esp_a2d_cb_event_t event, esp_a2d_cb_param_t *param)
+{
+    switch (event) {
+        case ESP_A2D_CONNECTION_STATE_EVT:
+            if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+                ESP_LOGI(TAG, "A2DP connected");
+                g_a2dp_sink.state = A2DP_SINK_STATE_CONNECTED;
+                trigger_event(A2DP_SINK_EVENT_CONNECTED, NULL);
+            } else if (param->conn_stat.state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+                ESP_LOGI(TAG, "A2DP disconnected");
+                g_a2dp_sink.state = A2DP_SINK_STATE_INITIALIZED;
+                trigger_event(A2DP_SINK_EVENT_DISCONNECTED, NULL);
+            }
+            break;
+
+        case ESP_A2D_AUDIO_STATE_EVT:
+            if (param->audio_stat.state == ESP_A2D_AUDIO_STATE_STARTED) {
+                ESP_LOGI(TAG, "A2DP audio started");
+                trigger_event(A2DP_SINK_EVENT_AUDIO_START, NULL);
+            } else if (param->audio_stat.state == ESP_A2D_AUDIO_STATE_STOPPED) {
+                ESP_LOGI(TAG, "A2DP audio stopped");
+                trigger_event(A2DP_SINK_EVENT_AUDIO_STOP, NULL);
+            }
+            break;
+
+        default:
+            break;
+    }
+}
+
+/**
+ * @brief 确保BT协议栈已启动（仅首次调用时初始化，之后保持活跃）
+ */
+static esp_err_t ensure_bt_stack_up(void)
+{
+    if (g_a2dp_sink.bt_stack_up) {
+        ESP_LOGI(TAG, "BT stack already up, reusing");
+        return ESP_OK;
+    }
+
+    /* BT Controller */
+    esp_bt_controller_status_t ctrl_status = esp_bt_controller_get_status();
+    if (ctrl_status != ESP_BT_CONTROLLER_STATUS_ENABLED) {
+        ESP_LOGI(TAG, "BT Controller not enabled, initializing...");
+        if (ctrl_status == ESP_BT_CONTROLLER_STATUS_INITED) {
+            esp_bt_controller_deinit();
+        }
+        esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+        esp_err_t ret = esp_bt_controller_init(&bt_cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "BT controller init failed: %s", esp_err_to_name(ret));
+            return ESP_FAIL;
+        }
+        ret = esp_bt_controller_enable(ESP_BT_MODE_BTDM);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "BT controller enable failed: %s", esp_err_to_name(ret));
+            esp_bt_controller_deinit();
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "BT Controller initialized in BTDM mode");
+    }
+
+    /* Bluedroid */
+    esp_bluedroid_status_t bd_status = esp_bluedroid_get_status();
+    if (bd_status != ESP_BLUEDROID_STATUS_ENABLED) {
+        ESP_LOGI(TAG, "Bluedroid not enabled, initializing...");
+        if (bd_status == ESP_BLUEDROID_STATUS_UNINITIALIZED) {
+            esp_bluedroid_config_t bluedroid_cfg = BT_BLUEDROID_INIT_CONFIG_DEFAULT();
+            bluedroid_cfg.ssp_en = true;
+            esp_err_t ret = esp_bluedroid_init_with_cfg(&bluedroid_cfg);
+            if (ret != ESP_OK) {
+                ESP_LOGE(TAG, "Bluedroid init failed: %s", esp_err_to_name(ret));
+                return ESP_FAIL;
+            }
+        }
+        esp_err_t ret = esp_bluedroid_enable();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Bluedroid enable failed: %s", esp_err_to_name(ret));
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "Bluedroid initialized and enabled with SSP");
+    }
+
