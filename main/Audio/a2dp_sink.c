@@ -194,3 +194,102 @@ static esp_err_t ensure_bt_stack_up(void)
         ESP_LOGI(TAG, "Bluedroid initialized and enabled with SSP");
     }
 
+    /* SSP */
+    esp_bt_io_cap_t iocap = ESP_BT_IO_CAP_NONE;
+    esp_bt_gap_set_security_param(ESP_BT_SP_IOCAP_MODE, &iocap, sizeof(uint8_t));
+
+    /* GAP callback */
+    esp_bt_gap_register_callback(bt_app_gap_cb);
+
+    /* 默认不可发现 */
+    esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
+
+    g_a2dp_sink.bt_stack_up = true;
+    ESP_LOGI(TAG, "BT stack is up and ready");
+    return ESP_OK;
+}
+
+esp_err_t a2dp_sink_init(void)
+{
+    if (g_a2dp_sink.initialized) {
+        ESP_LOGW(TAG, "A2DP Sink already initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Initializing A2DP Sink...");
+
+    /* 获取音频板句柄 */
+    g_a2dp_sink.board_handle = audio_board_init();
+    if (g_a2dp_sink.board_handle == NULL) {
+        ESP_LOGE(TAG, "Failed to init audio board");
+        return ESP_FAIL;
+    }
+    audio_hal_ctrl_codec(g_a2dp_sink.board_handle->audio_hal, AUDIO_HAL_CODEC_MODE_DECODE, AUDIO_HAL_CTRL_START);
+
+    /* 确保BT协议栈已启动（首次init时启动，后续复用） */
+    esp_err_t ret = ensure_bt_stack_up();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    /* 设置设备名称 */
+    const char *device_name = get_device_name();
+    esp_bt_gap_set_device_name(device_name);
+    ESP_LOGI(TAG, "Bluetooth device name set: %s", device_name);
+
+    /* 预初始化AVRC CT/TG，确保a2dp_stream_init内部的A2DP init能正确关联AVCTP协议。
+     * 异步操作，需要yield让BTC任务处理。 */
+    esp_avrc_ct_init();
+    esp_avrc_tg_init();
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    /* 创建音频管道 */
+    ESP_LOGI(TAG, "Creating audio pipeline");
+    audio_pipeline_cfg_t pipeline_cfg = DEFAULT_AUDIO_PIPELINE_CONFIG();
+    g_a2dp_sink.pipeline = audio_pipeline_init(&pipeline_cfg);
+    if (g_a2dp_sink.pipeline == NULL) {
+        ESP_LOGE(TAG, "Failed to create audio pipeline");
+        return ESP_FAIL;
+    }
+
+    /* 创建A2DP Sink流 */
+    ESP_LOGI(TAG, "Creating A2DP sink stream");
+    a2dp_stream_config_t a2dp_config = {
+        .type = AUDIO_STREAM_READER,
+        .user_callback = {
+            .user_a2d_cb = bt_app_a2d_cb,
+            .user_a2d_sink_data_cb = NULL,
+        },
+        .audio_hal = g_a2dp_sink.board_handle->audio_hal,
+    };
+    g_a2dp_sink.a2dp_stream = a2dp_stream_init(&a2dp_config);
+    if (g_a2dp_sink.a2dp_stream == NULL) {
+        ESP_LOGE(TAG, "Failed to create A2DP stream");
+        audio_pipeline_deinit(g_a2dp_sink.pipeline);
+        return ESP_FAIL;
+    }
+
+    /* 设置可发现模式 */
+    esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
+    ESP_LOGI(TAG, "Scan mode set: CONNECTABLE + GENERAL_DISCOVERABLE");
+
+    /* 创建I2S流 */
+    ESP_LOGI(TAG, "Creating I2S stream");
+    i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
+    i2s_cfg.type = AUDIO_STREAM_WRITER;
+    g_a2dp_sink.i2s_stream = i2s_stream_init(&i2s_cfg);
+    if (g_a2dp_sink.i2s_stream == NULL) {
+        ESP_LOGE(TAG, "Failed to create I2S stream");
+        audio_element_deinit(g_a2dp_sink.a2dp_stream);
+        audio_pipeline_deinit(g_a2dp_sink.pipeline);
+        return ESP_FAIL;
+    }
+
+    /* 注册元素到管道并链接 */
+    audio_pipeline_register(g_a2dp_sink.pipeline, g_a2dp_sink.a2dp_stream, "a2dp");
+    audio_pipeline_register(g_a2dp_sink.pipeline, g_a2dp_sink.i2s_stream, "i2s");
+    const char *link_tag[2] = {"a2dp", "i2s"};
+    audio_pipeline_link(g_a2dp_sink.pipeline, &link_tag[0], 2);
+
+    /* 创建事件监听器 */
+    audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
