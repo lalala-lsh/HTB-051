@@ -293,3 +293,101 @@ esp_err_t a2dp_sink_init(void)
 
     /* 创建事件监听器 */
     audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
+    g_a2dp_sink.evt = audio_event_iface_init(&evt_cfg);
+    audio_pipeline_set_listener(g_a2dp_sink.pipeline, g_a2dp_sink.evt);
+
+    g_a2dp_sink.state = A2DP_SINK_STATE_INITIALIZED;
+    g_a2dp_sink.initialized = true;
+
+    ESP_LOGI(TAG, "A2DP Sink initialized successfully");
+    return ESP_OK;
+}
+
+esp_err_t a2dp_sink_deinit(void)
+{
+    if (!g_a2dp_sink.initialized) {
+        ESP_LOGW(TAG, "A2DP Sink not initialized");
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Deinitializing A2DP Sink...");
+
+    /* 清除事件回调，防止断开事件触发重入 */
+    g_a2dp_sink.event_callback = NULL;
+
+    /* 停止任务 */
+    if (g_a2dp_sink.task_handle != NULL) {
+        vTaskDelete(g_a2dp_sink.task_handle);
+        g_a2dp_sink.task_handle = NULL;
+    }
+
+    /* 停止管道 */
+    if (g_a2dp_sink.pipeline) {
+        audio_pipeline_stop(g_a2dp_sink.pipeline);
+        audio_pipeline_wait_for_stop(g_a2dp_sink.pipeline);
+        audio_pipeline_terminate(g_a2dp_sink.pipeline);
+
+        if (g_a2dp_sink.evt) {
+            audio_pipeline_remove_listener(g_a2dp_sink.pipeline);
+            audio_event_iface_destroy(g_a2dp_sink.evt);
+            g_a2dp_sink.evt = NULL;
+        }
+
+        if (g_a2dp_sink.a2dp_stream) {
+            audio_pipeline_unregister(g_a2dp_sink.pipeline, g_a2dp_sink.a2dp_stream);
+            audio_element_deinit(g_a2dp_sink.a2dp_stream);
+            g_a2dp_sink.a2dp_stream = NULL;
+        }
+        if (g_a2dp_sink.i2s_stream) {
+            audio_pipeline_unregister(g_a2dp_sink.pipeline, g_a2dp_sink.i2s_stream);
+            audio_element_deinit(g_a2dp_sink.i2s_stream);
+            g_a2dp_sink.i2s_stream = NULL;
+        }
+
+        audio_pipeline_deinit(g_a2dp_sink.pipeline);
+        g_a2dp_sink.pipeline = NULL;
+    }
+
+    /* 清理AVRC配置文件（a2dp_stream destroy只清A2DP不清AVRC）*/
+    esp_avrc_ct_deinit();
+    esp_avrc_tg_deinit();
+    vTaskDelay(pdMS_TO_TICKS(200));
+
+    /* BT协议栈保持活跃，仅设置为不可发现 */
+    esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
+
+    g_a2dp_sink.state = A2DP_SINK_STATE_IDLE;
+    g_a2dp_sink.initialized = false;
+
+    ESP_LOGI(TAG, "A2DP Sink deinitialized (BT stack kept alive)");
+    return ESP_OK;
+}
+
+esp_err_t a2dp_sink_start(void)
+{
+    if (!g_a2dp_sink.initialized) {
+        ESP_LOGE(TAG, "A2DP Sink not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Starting A2DP Sink...");
+
+    const char *device_name = get_device_name();
+    esp_bt_gap_set_device_name(device_name);
+    ESP_LOGI(TAG, "Bluetooth device name set: %s", device_name);
+
+    esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
+    ESP_LOGI(TAG, "Scan mode set: CONNECTABLE + GENERAL_DISCOVERABLE");
+
+    esp_err_t ret = audio_pipeline_run(g_a2dp_sink.pipeline);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to run audio pipeline: %s", esp_err_to_name(ret));
+        return ret;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(100));
+    esp_bt_gap_set_scan_mode(ESP_BT_CONNECTABLE, ESP_BT_GENERAL_DISCOVERABLE);
+
+    if (g_a2dp_sink.task_handle == NULL) {
+        BaseType_t task_ret = xTaskCreate(a2dp_sink_task, "a2dp_sink_task", 4096, NULL, 10, &g_a2dp_sink.task_handle);
+        if (task_ret != pdPASS) {
