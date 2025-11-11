@@ -391,3 +391,101 @@ esp_err_t a2dp_sink_start(void)
     if (g_a2dp_sink.task_handle == NULL) {
         BaseType_t task_ret = xTaskCreate(a2dp_sink_task, "a2dp_sink_task", 4096, NULL, 10, &g_a2dp_sink.task_handle);
         if (task_ret != pdPASS) {
+            ESP_LOGE(TAG, "Failed to create A2DP sink task");
+            audio_pipeline_stop(g_a2dp_sink.pipeline);
+            return ESP_FAIL;
+        }
+    }
+
+    ESP_LOGI(TAG, "A2DP Sink started, waiting for connection...");
+    return ESP_OK;
+}
+
+esp_err_t a2dp_sink_stop(void)
+{
+    if (!g_a2dp_sink.initialized) {
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Stopping A2DP Sink...");
+
+    if (g_a2dp_sink.task_handle != NULL) {
+        vTaskDelete(g_a2dp_sink.task_handle);
+        g_a2dp_sink.task_handle = NULL;
+    }
+
+    esp_bt_gap_set_scan_mode(ESP_BT_NON_CONNECTABLE, ESP_BT_NON_DISCOVERABLE);
+
+    if (g_a2dp_sink.pipeline) {
+        audio_pipeline_stop(g_a2dp_sink.pipeline);
+        audio_pipeline_wait_for_stop(g_a2dp_sink.pipeline);
+    }
+
+    g_a2dp_sink.state = A2DP_SINK_STATE_INITIALIZED;
+
+    ESP_LOGI(TAG, "A2DP Sink stopped");
+    return ESP_OK;
+}
+
+bool a2dp_sink_is_connected(void)
+{
+    return g_a2dp_sink.state == A2DP_SINK_STATE_CONNECTED;
+}
+
+a2dp_sink_state_t a2dp_sink_get_state(void)
+{
+    return g_a2dp_sink.state;
+}
+
+esp_err_t a2dp_sink_register_callback(a2dp_sink_event_cb_t callback)
+{
+    g_a2dp_sink.event_callback = callback;
+    return ESP_OK;
+}
+
+esp_err_t a2dp_sink_set_volume(int volume)
+{
+    if (!g_a2dp_sink.initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (volume < 0) volume = 0;
+    if (volume > 100) volume = 100;
+
+    if (g_a2dp_sink.board_handle && g_a2dp_sink.board_handle->audio_hal) {
+        return audio_hal_set_volume(g_a2dp_sink.board_handle->audio_hal, volume);
+    }
+
+    return ESP_FAIL;
+}
+
+/**
+ * @brief A2DP Sink 事件处理任务
+ */
+static void a2dp_sink_task(void *pvParameters)
+{
+    ESP_LOGI(TAG, "A2DP Sink task started");
+
+    audio_event_iface_msg_t msg;
+    while (1) {
+        esp_err_t ret = audio_event_iface_listen(g_a2dp_sink.evt, &msg, portMAX_DELAY);
+        if (ret != ESP_OK) {
+            continue;
+        }
+
+        if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT) {
+            if (msg.source == (void *)g_a2dp_sink.a2dp_stream) {
+                if (msg.cmd == AEL_MSG_CMD_REPORT_MUSIC_INFO) {
+                    audio_element_info_t music_info = {0};
+                    audio_element_getinfo(g_a2dp_sink.a2dp_stream, &music_info);
+                    ESP_LOGI(TAG, "A2DP music info: sample_rate=%d, channels=%d, bits=%d",
+                             music_info.sample_rates, music_info.channels, music_info.bits);
+                    i2s_stream_set_clk(g_a2dp_sink.i2s_stream,
+                                       music_info.sample_rates,
+                                       music_info.bits,
+                                       music_info.channels);
+                }
+            }
+        }
+    }
+}
