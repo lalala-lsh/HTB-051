@@ -78,3 +78,83 @@ static void audio_mode_a2dp_event_cb(a2dp_sink_event_t event, void *param)
 
 esp_err_t audio_mode_init(void)
 {
+    if (g_audio_mode.initialized) {
+        return ESP_OK;
+    }
+
+    /* 创建互斥锁 */
+    g_audio_mode.mutex = xSemaphoreCreateMutex();
+    if (g_audio_mode.mutex == NULL) {
+        ESP_LOGE(TAG, "Failed to create mutex");
+        return ESP_FAIL;
+    }
+
+    g_audio_mode.current_mode = AUDIO_PLAYBACK_MODE_LOCAL;
+    g_audio_mode.initialized = true;
+
+    ESP_LOGI(TAG, "Audio mode manager initialized (mode=LOCAL)");
+    return ESP_OK;
+}
+
+audio_playback_mode_t audio_mode_get_current(void)
+{
+    return g_audio_mode.current_mode;
+}
+
+esp_err_t audio_mode_switch_to_a2dp(void)
+{
+    if (!g_audio_mode.initialized) {
+        /* 自动初始化 */
+        esp_err_t ret = audio_mode_init();
+        if (ret != ESP_OK) {
+            return ret;
+        }
+    }
+
+    if (xSemaphoreTake(g_audio_mode.mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        ESP_LOGE(TAG, "Failed to acquire mutex");
+        return ESP_FAIL;
+    }
+
+    if (g_audio_mode.current_mode == AUDIO_PLAYBACK_MODE_A2DP) {
+        ESP_LOGW(TAG, "Already in A2DP mode");
+        xSemaphoreGive(g_audio_mode.mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Switching to A2DP mode...");
+
+    /* 等待当前播放的语音提示完成，避免audio_queue仍在wait_for_finish时释放MP3播放器 */
+    ESP_LOGI(TAG, "Waiting for current audio to finish...");
+    esp_err_t wait_ret = audio_queue_wait_for_prompts_idle(10000);
+    if (wait_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Timed out waiting for local prompt audio, stopping MP3 before A2DP switch");
+        mp3_player_stop();
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    /* 步骤1: 暂停 audio_queue (避免新的播放请求) */
+    ESP_LOGI(TAG, "Step 1: Pausing audio queue");
+    audio_queue_set_paused(true);
+
+    /* 步骤2: 完全反初始化 MP3 播放器，释放 I2S 硬件资源 */
+    /* 注意：mp3_player_stop() 只停止播放，不释放 I2S 资源 */
+    /* 必须调用 mp3_player_deinit() 才能让 A2DP 使用 I2S */
+    ESP_LOGI(TAG, "Step 2: Deinitializing MP3 player to release I2S");
+    mp3_player_deinit();
+
+    /* 等待资源完全释放 */
+    vTaskDelay(pdMS_TO_TICKS(300));
+
+    /* 步骤3: 初始化 A2DP Sink */
+    ESP_LOGI(TAG, "Step 3: Initializing A2DP Sink");
+    esp_err_t ret = a2dp_sink_init();
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(TAG, "Failed to initialize A2DP Sink: %s", esp_err_to_name(ret));
+        /* 恢复本地模式 */
+        audio_queue_set_paused(false);
+        xSemaphoreGive(g_audio_mode.mutex);
+        return ret;
+    }
+
+    /* 步骤4: 注册A2DP事件回调(用于断开时自动切换回本地模式) */
