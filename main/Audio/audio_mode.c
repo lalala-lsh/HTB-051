@@ -158,3 +158,83 @@ esp_err_t audio_mode_switch_to_a2dp(void)
     }
 
     /* 步骤4: 注册A2DP事件回调(用于断开时自动切换回本地模式) */
+    a2dp_sink_register_callback(audio_mode_a2dp_event_cb);
+
+    /* 步骤5: 启动 A2DP Sink */
+    ESP_LOGI(TAG, "Step 4: Starting A2DP Sink");
+    ret = a2dp_sink_start();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start A2DP Sink: %s", esp_err_to_name(ret));
+        a2dp_sink_deinit();
+        audio_queue_set_paused(false);
+        xSemaphoreGive(g_audio_mode.mutex);
+        return ret;
+    }
+
+    g_audio_mode.current_mode = AUDIO_PLAYBACK_MODE_A2DP;
+
+    ESP_LOGI(TAG, "=== A2DP Mode Active ===");
+    ESP_LOGI(TAG, "Device is now discoverable as Bluetooth speaker");
+    ESP_LOGI(TAG, "Connect from your phone to stream audio");
+
+    xSemaphoreGive(g_audio_mode.mutex);
+    return ESP_OK;
+}
+
+esp_err_t audio_mode_switch_to_local(void)
+{
+    if (!g_audio_mode.initialized) {
+        return ESP_OK;
+    }
+
+    if (xSemaphoreTake(g_audio_mode.mutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        ESP_LOGE(TAG, "Failed to acquire mutex");
+        return ESP_FAIL;
+    }
+
+    if (g_audio_mode.current_mode == AUDIO_PLAYBACK_MODE_LOCAL) {
+        ESP_LOGW(TAG, "Already in local mode");
+        xSemaphoreGive(g_audio_mode.mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ESP_LOGI(TAG, "Switching to local mode...");
+
+    /* 步骤1: 停止并反初始化 A2DP Sink */
+    ESP_LOGI(TAG, "Step 1: Stopping and deinitializing A2DP Sink");
+    a2dp_sink_stop();
+    a2dp_sink_deinit();
+
+    /* 等待A2DP完全停止 */
+    vTaskDelay(pdMS_TO_TICKS(300));
+
+    /* 步骤2: 重新初始化 MP3 播放器 */
+    ESP_LOGI(TAG, "Step 2: Reinitializing MP3 player");
+    esp_err_t mp3_ret = mp3_player_init();
+    if (mp3_ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to reinitialize MP3 player: %s", esp_err_to_name(mp3_ret));
+        /* 继续，因为 audio_queue 可能会在后续触发重试 */
+    }
+
+    /* 步骤3: 恢复 audio_queue */
+    ESP_LOGI(TAG, "Step 3: Resuming audio queue");
+    audio_queue_set_paused(false);
+
+    g_audio_mode.current_mode = AUDIO_PLAYBACK_MODE_LOCAL;
+
+    ESP_LOGI(TAG, "=== Local Mode Active ===");
+    ESP_LOGI(TAG, "Local MP3 playback restored");
+
+    xSemaphoreGive(g_audio_mode.mutex);
+    return ESP_OK;
+}
+
+bool audio_mode_is_a2dp(void)
+{
+    return g_audio_mode.current_mode == AUDIO_PLAYBACK_MODE_A2DP;
+}
+
+bool audio_mode_is_local(void)
+{
+    return g_audio_mode.current_mode == AUDIO_PLAYBACK_MODE_LOCAL;
+}
