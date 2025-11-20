@@ -93,3 +93,98 @@ static void audio_queue_unlock(void)
     if (audio_mutex != NULL) {
         xSemaphoreGive(audio_mutex);
     }
+}
+
+static bool is_prompt_request(const internal_audio_request_t *request)
+{
+    return request != NULL &&
+           request->mode == AUDIO_PLAY_MODE_ONCE &&
+           request->type != AUDIO_TYPE_MUSIC_CTRL;
+}
+
+static void clear_deferred_background_unsafe(void)
+{
+    deferred_background_valid = false;
+    memset(deferred_background_file, 0, sizeof(deferred_background_file));
+    deferred_background_type = AUDIO_TYPE_MUSIC_CTRL;
+    deferred_background_priority = AUDIO_PRIORITY_LOW;
+}
+
+static void enqueue_deferred_background_if_ready_unsafe(void)
+{
+    if (!deferred_background_valid || prompt_work_count != 0 || audio_queue_paused) {
+        return;
+    }
+
+    internal_audio_request_t request = {
+        .type = deferred_background_type,
+        .priority = deferred_background_priority,
+        .mode = AUDIO_PLAY_MODE_LOOP,
+        .need_resume_music = false
+    };
+
+    strncpy(request.file_path, deferred_background_file, sizeof(request.file_path) - 1);
+    request.file_path[sizeof(request.file_path) - 1] = '\0';
+    clear_deferred_background_unsafe();
+
+    if (xQueueSend(audio_queue, &request, 0) != pdTRUE) {
+        ESP_LOGW(TAG, "音频队列已满,丢弃延后背景音乐请求: %s", request.file_path);
+    } else {
+        ESP_LOGD(TAG, "延后背景音乐请求已加入队列: %s", request.file_path);
+    }
+}
+
+static void finish_prompt_request_unsafe(void)
+{
+    if (prompt_work_count > 0) {
+        prompt_work_count--;
+    }
+    enqueue_deferred_background_if_ready_unsafe();
+}
+
+/**
+ * @brief 检查音频是否在防抖期内
+ * @param type 音频类型
+ * @return true 在防抖期内,false 不在防抖期内
+ */
+static bool is_audio_debouncing(audio_type_t type, const char *file_path)
+{
+    if (type >= AUDIO_TYPE_MAX) {
+        return false;
+    }
+    if (file_path == NULL || strcmp(last_play_file[type], file_path) != 0) {
+        return false;
+    }
+
+    uint32_t current_time = get_current_time_ms();
+    uint32_t elapsed = current_time - last_play_time[type];
+
+    return elapsed < debounce_time_map[type];
+}
+
+/**
+ * @brief 更新音频类型的最后播放时间
+ * @param type 音频类型
+ */
+static void update_last_play_time(audio_type_t type, const char *file_path)
+{
+    if (type < AUDIO_TYPE_MAX) {
+        last_play_time[type] = get_current_time_ms();
+        if (file_path != NULL) {
+            strncpy(last_play_file[type], file_path, sizeof(last_play_file[type]) - 1);
+            last_play_file[type][sizeof(last_play_file[type]) - 1] = '\0';
+        }
+    }
+}
+
+/**
+ * @brief 音频处理任务
+ * @param pvParameters 任务参数
+ */
+static void audio_task(void *pvParameters)
+{
+    internal_audio_request_t request;
+
+    ESP_LOGI(TAG, "音频队列处理任务启动");
+
+    while (1) {
