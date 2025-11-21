@@ -188,3 +188,98 @@ static void audio_task(void *pvParameters)
     ESP_LOGI(TAG, "音频队列处理任务启动");
 
     while (1) {
+        // 从队列接收音频请求
+        if (xQueueReceive(audio_queue, &request, portMAX_DELAY)) {
+            // 检查是否暂停
+            if (audio_queue_paused) {
+                ESP_LOGD(TAG, "音频队列已暂停,跳过播放: %s", request.file_path);
+                if (is_prompt_request(&request) && audio_queue_lock(pdMS_TO_TICKS(1000))) {
+                    finish_prompt_request_unsafe();
+                    audio_queue_unlock();
+                }
+                continue;
+            }
+
+            // 获取互斥锁
+            if (audio_queue_lock(pdMS_TO_TICKS(1000))) {
+                ESP_LOGI(TAG, "播放音频: %s, 类型: %d, 优先级: %d, 模式: %d",
+                         request.file_path, request.type, request.priority, request.mode);
+
+                esp_err_t ret = ESP_OK;
+
+                if (request.mode == AUDIO_PLAY_MODE_LOOP) {
+                    if (!audio_file_exists(request.file_path)) {
+                        ESP_LOGW(TAG, "循环播放文件不存在，跳过: %s", request.file_path);
+                        background_music_was_playing = false;
+                        memset(background_music_file, 0, sizeof(background_music_file));
+                        audio_queue_unlock();
+                        continue;
+                    }
+                    // 循环播放模式 - 保存为背景音乐
+                    strncpy(background_music_file, request.file_path, sizeof(background_music_file) - 1);
+                    background_music_file[sizeof(background_music_file) - 1] = '\0';
+                    background_music_was_playing = true;
+                    clear_deferred_background_unsafe();
+
+                    ret = mp3_player_play_loop(request.file_path);
+                } else {
+                    // 单次播放模式 - 检查是否需要中断背景音乐
+                    mp3_player_state_t current_state = mp3_player_get_state();
+                    if (current_state == MP3_PLAYER_STATE_PLAYING && background_music_was_playing) {
+                        ESP_LOGD(TAG, "检测到背景音乐正在播放,准备中断并稍后恢复");
+                    }
+
+                    ret = mp3_player_play(request.file_path);
+
+                    if (ret == ESP_OK) {
+                        // 等待播放完成
+                        esp_err_t wait_ret = mp3_player_wait_for_finish(10000);
+
+                        if (wait_ret == ESP_ERR_TIMEOUT) {
+                            ESP_LOGW(TAG, "等待播放完成超时,强制停止播放: %s", request.file_path);
+                            background_music_was_playing = false;
+                        } else if (wait_ret != ESP_OK) {
+                            ESP_LOGE(TAG, "播放过程中发生错误,停止播放: %s", request.file_path);
+                            mp3_player_stop();
+                            background_music_was_playing = false;
+                        } else if (request.need_resume_music && background_music_was_playing) {
+                            char resume_file[sizeof(background_music_file)] = {0};
+                            strncpy(resume_file, background_music_file, sizeof(resume_file) - 1);
+                            resume_file[sizeof(resume_file) - 1] = '\0';
+                            ESP_LOGD(TAG, "播放完成,恢复背景音乐: %s", resume_file);
+
+                            if (prompt_work_count > 1) {
+                                ESP_LOGD(TAG, "仍有提示音等待播放,延后恢复背景音乐: %s", resume_file);
+                            } else if (resume_file[0] != '\0' && audio_file_exists(resume_file)) {
+                                // 增加延时时间,确保 I2S 完全释放资源后再恢复音乐(从100ms增加到300ms)
+                                vTaskDelay(pdMS_TO_TICKS(300));
+                                if (audio_queue_paused) {
+                                    ESP_LOGI(TAG, "音频队列已暂停,跳过本次背景音乐恢复: %s", resume_file);
+                                    ret = ESP_OK;
+                                } else {
+                                    ret = mp3_player_play_loop(resume_file);
+                                }
+                                if (ret == ESP_OK) {
+                                    if (!audio_queue_paused) {
+                                        ESP_LOGI(TAG, "背景音乐已恢复播放: %s", resume_file);
+                                    }
+                                } else {
+                                    ESP_LOGE(TAG, "恢复背景音乐失败: %s", esp_err_to_name(ret));
+                                    background_music_was_playing = false;
+                                }
+                            } else {
+                                ESP_LOGD(TAG, "背景音乐文件不存在或路径为空,不恢复播放");
+                                background_music_was_playing = false;
+                            }
+                        }
+
+                        if (wait_ret != ESP_OK) {
+                            ret = wait_ret;
+                        }
+                    }
+
+                    if (is_prompt_request(&request)) {
+                        finish_prompt_request_unsafe();
+                    }
+                }
+
