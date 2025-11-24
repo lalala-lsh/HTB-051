@@ -283,3 +283,98 @@ static void audio_task(void *pvParameters)
                     }
                 }
 
+                if (ret != ESP_OK) {
+                    ESP_LOGE(TAG, "播放音频失败: %s, 错误: %s", request.file_path, esp_err_to_name(ret));
+                }
+
+                // 更新防抖时间
+                update_last_play_time(request.type, request.file_path);
+
+                // 释放互斥锁
+                audio_queue_unlock();
+            } else {
+                ESP_LOGW(TAG, "获取音频互斥锁超时,跳过播放: %s", request.file_path);
+            }
+        }
+    }
+}
+
+/**
+ * @brief 初始化音频队列管理器
+ * @return esp_err_t 错误码
+ */
+esp_err_t audio_queue_init(void)
+{
+    if (audio_queue_initialized) {
+        ESP_LOGW(TAG, "音频队列已初始化");
+        return ESP_OK;
+    }
+
+    // 创建音频队列
+    audio_queue = xQueueCreate(AUDIO_QUEUE_SIZE, sizeof(internal_audio_request_t));
+    if (audio_queue == NULL) {
+        ESP_LOGE(TAG, "创建音频队列失败");
+        return ESP_FAIL;
+    }
+
+    // 创建互斥锁
+    audio_mutex = xSemaphoreCreateMutex();
+    if (audio_mutex == NULL) {
+        ESP_LOGE(TAG, "创建音频互斥锁失败");
+        vQueueDelete(audio_queue);
+        return ESP_FAIL;
+    }
+
+    // 创建音频处理任务
+    BaseType_t ret = xTaskCreate(
+        audio_task,
+        "audio_queue_task",
+        AUDIO_TASK_STACK_SIZE,
+        NULL,
+        AUDIO_TASK_PRIORITY,
+        &audio_task_handle
+    );
+
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "创建音频处理任务失败");
+        vSemaphoreDelete(audio_mutex);
+        vQueueDelete(audio_queue);
+        return ESP_FAIL;
+    }
+
+    // 初始化防抖记录
+    memset(last_play_time, 0, sizeof(last_play_time));
+    memset(last_play_file, 0, sizeof(last_play_file));
+
+    // 初始化背景音乐状态
+    background_music_was_playing = false;
+    memset(background_music_file, 0, sizeof(background_music_file));
+    clear_deferred_background_unsafe();
+    prompt_work_count = 0;
+
+    // 从NVS读取音乐/语音启用状态
+    music_enabled = (device_params_get_music_state() == 1);
+    voice_enabled = (device_params_get_voice_state() == 1);
+
+    audio_queue_initialized = true;
+    audio_queue_paused = false;
+
+    ESP_LOGI(TAG, "音频队列管理器初始化成功(music=%d, voice=%d)", music_enabled, voice_enabled);
+    return ESP_OK;
+}
+
+/**
+ * @brief 反初始化音频队列管理器
+ * @return esp_err_t 错误码
+ */
+esp_err_t audio_queue_deinit(void)
+{
+    if (!audio_queue_initialized) {
+        return ESP_OK;
+    }
+
+    // 删除任务
+    if (audio_task_handle != NULL) {
+        vTaskDelete(audio_task_handle);
+        audio_task_handle = NULL;
+    }
