@@ -378,3 +378,98 @@ esp_err_t audio_queue_deinit(void)
         vTaskDelete(audio_task_handle);
         audio_task_handle = NULL;
     }
+
+    // 删除互斥锁
+    if (audio_mutex != NULL) {
+        vSemaphoreDelete(audio_mutex);
+        audio_mutex = NULL;
+    }
+
+    // 删除队列
+    if (audio_queue != NULL) {
+        vQueueDelete(audio_queue);
+        audio_queue = NULL;
+    }
+
+    audio_queue_initialized = false;
+
+    ESP_LOGI(TAG, "音频队列管理器已反初始化");
+    return ESP_OK;
+}
+
+/**
+ * @brief 请求播放音频(带防抖)
+ * @param file_path 音频文件路径
+ * @param type 音频类型
+ * @param priority 优先级(0-3,0最高)
+ * @param need_resume_music 播放完成后是否恢复背景音乐
+ * @return esp_err_t 错误码
+ */
+esp_err_t audio_queue_play(const char* file_path, audio_type_t type, uint8_t priority, bool need_resume_music)
+{
+    if (!audio_queue_initialized || file_path == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 检查语音功能是否启用(非音乐类型的音频受voice_enabled控制)
+    if (type != AUDIO_TYPE_MUSIC_CTRL && !voice_enabled) {
+        ESP_LOGD(TAG, "语音功能已禁用,跳过播放: %s", file_path);
+        return ESP_OK;
+    }
+
+    // 检查防抖
+    if (is_audio_debouncing(type, file_path)) {
+        ESP_LOGD(TAG, "音频类型 %d 文件 %s 在防抖期内,跳过播放", type, file_path);
+        return ESP_OK; // 防抖期内不是错误,返回成功
+    }
+
+    // 构建内部请求
+    internal_audio_request_t request = {
+        .type = type,
+        .priority = priority,
+        .mode = AUDIO_PLAY_MODE_ONCE,
+        .need_resume_music = need_resume_music
+    };
+
+    // 复制文件路径
+    strncpy(request.file_path, file_path, sizeof(request.file_path) - 1);
+    request.file_path[sizeof(request.file_path) - 1] = '\0';
+
+    bool is_prompt = is_prompt_request(&request);
+    if (is_prompt && !audio_queue_lock(pdMS_TO_TICKS(1000))) {
+        ESP_LOGW(TAG, "提示音入队时获取互斥锁超时: %s", file_path);
+        return ESP_ERR_TIMEOUT;
+    }
+    if (is_prompt) {
+        prompt_work_count++;
+    }
+
+    // 发送到队列
+    if (xQueueSend(audio_queue, &request, pdMS_TO_TICKS(100)) != pdTRUE) {
+        if (is_prompt) {
+            finish_prompt_request_unsafe();
+            audio_queue_unlock();
+        }
+        ESP_LOGW(TAG, "音频队列已满,丢弃请求: %s", file_path);
+        return ESP_ERR_NO_MEM;
+    }
+
+    if (is_prompt) {
+        audio_queue_unlock();
+    }
+
+    ESP_LOGD(TAG, "音频请求已加入队列: %s, 类型: %d, 优先级: %d", file_path, type, priority);
+    return ESP_OK;
+}
+
+/**
+ * @brief 请求播放音频循环(背景音乐)
+ * @param file_path 音频文件路径
+ * @param type 音频类型
+ * @param priority 优先级
+ * @return esp_err_t 错误码
+ */
+static esp_err_t audio_queue_play_loop_internal(const char* file_path, audio_type_t type,
+                                                uint8_t priority, bool respect_music_enabled)
+{
+    if (!audio_queue_initialized || file_path == NULL) {
