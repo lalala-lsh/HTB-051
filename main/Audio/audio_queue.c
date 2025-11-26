@@ -473,3 +473,98 @@ static esp_err_t audio_queue_play_loop_internal(const char* file_path, audio_typ
                                                 uint8_t priority, bool respect_music_enabled)
 {
     if (!audio_queue_initialized || file_path == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    // 检查音乐功能是否启用
+    if (respect_music_enabled && !music_enabled) {
+        ESP_LOGD(TAG, "音乐功能已禁用,跳过循环播放: %s", file_path);
+        return ESP_OK;
+    }
+
+    // 构建内部请求
+    internal_audio_request_t request = {
+        .type = type,
+        .priority = priority,
+        .mode = AUDIO_PLAY_MODE_LOOP,
+        .need_resume_music = false
+    };
+
+    // 复制文件路径
+    strncpy(request.file_path, file_path, sizeof(request.file_path) - 1);
+    request.file_path[sizeof(request.file_path) - 1] = '\0';
+
+    if (!audio_queue_lock(pdMS_TO_TICKS(1000))) {
+        ESP_LOGW(TAG, "请求循环播放时获取互斥锁超时: %s", file_path);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    strncpy(background_music_file, file_path, sizeof(background_music_file) - 1);
+    background_music_file[sizeof(background_music_file) - 1] = '\0';
+    background_music_was_playing = true;
+
+    if (prompt_work_count > 0) {
+        strncpy(deferred_background_file, file_path, sizeof(deferred_background_file) - 1);
+        deferred_background_file[sizeof(deferred_background_file) - 1] = '\0';
+        deferred_background_type = type;
+        deferred_background_priority = priority;
+        deferred_background_valid = true;
+        audio_queue_unlock();
+        ESP_LOGD(TAG, "提示音未处理完,延后背景音乐请求: %s", file_path);
+        return ESP_OK;
+    }
+
+    xQueueReset(audio_queue);
+    audio_queue_unlock();
+
+    // 背景音乐不清空队列,避免吞掉尚未播放的提示音
+    mp3_player_state_t current_state = mp3_player_get_state();
+    if (current_state == MP3_PLAYER_STATE_PLAYING) {
+        ESP_LOGD(TAG, "当前有音频正在播放,准备切换到循环播放");
+    }
+
+    if (xQueueSend(audio_queue, &request, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGW(TAG, "音频队列已满,丢弃循环播放请求: %s", file_path);
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGD(TAG, "音频循环播放请求已加入队列: %s, 类型: %d, 优先级: %d", file_path, type, priority);
+    return ESP_OK;
+}
+
+esp_err_t audio_queue_play_loop(const char* file_path, audio_type_t type, uint8_t priority)
+{
+    return audio_queue_play_loop_internal(file_path, type, priority, true);
+}
+
+esp_err_t audio_queue_play_loop_force(const char* file_path, audio_type_t type, uint8_t priority)
+{
+    return audio_queue_play_loop_internal(file_path, type, priority, false);
+}
+
+/**
+ * @brief 停止音频播放
+ * @return esp_err_t 错误码
+ */
+esp_err_t audio_queue_stop(void)
+{
+    if (!audio_queue_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!audio_queue_lock(pdMS_TO_TICKS(5000))) {
+        ESP_LOGW(TAG, "停止音频时获取互斥锁超时");
+        return ESP_ERR_TIMEOUT;
+    }
+
+    // 清空队列
+    xQueueReset(audio_queue);
+
+    // 停止当前播放并重置背景音乐状态
+    background_music_was_playing = false;
+    memset(background_music_file, 0, sizeof(background_music_file));
+    clear_deferred_background_unsafe();
+    prompt_work_count = 0;
+
+    esp_err_t ret = mp3_player_stop();
+    audio_queue_unlock();
