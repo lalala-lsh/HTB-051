@@ -568,3 +568,98 @@ esp_err_t audio_queue_stop(void)
 
     esp_err_t ret = mp3_player_stop();
     audio_queue_unlock();
+    return ret;
+}
+
+/**
+ * @brief 检查指定类型音频是否在防抖期内
+ * @param type 音频类型
+ * @return true 在防抖期内,false 不在防抖期内
+ */
+bool audio_queue_is_debouncing(audio_type_t type)
+{
+    if (type >= AUDIO_TYPE_MAX) {
+        return false;
+    }
+
+    uint32_t current_time = get_current_time_ms();
+    uint32_t elapsed = current_time - last_play_time[type];
+    return elapsed < debounce_time_map[type];
+}
+
+/**
+ * @brief 清空音频队列
+ * @return esp_err_t 错误码
+ */
+esp_err_t audio_queue_clear(void)
+{
+    if (!audio_queue_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!audio_queue_lock(pdMS_TO_TICKS(5000))) {
+        ESP_LOGW(TAG, "清空音频队列时获取互斥锁超时");
+        return ESP_ERR_TIMEOUT;
+    }
+
+    xQueueReset(audio_queue);
+    background_music_was_playing = false;
+    memset(background_music_file, 0, sizeof(background_music_file));
+    clear_deferred_background_unsafe();
+    prompt_work_count = 0;
+    audio_queue_unlock();
+    ESP_LOGI(TAG, "音频队列已清空");
+    return ESP_OK;
+}
+
+/**
+ * @brief 设置音频队列暂停状态
+ * @param paused true暂停,false恢复
+ * @return esp_err_t 错误码
+ */
+esp_err_t audio_queue_set_paused(bool paused)
+{
+    audio_queue_paused = paused;
+    ESP_LOGI(TAG, "音频队列 %s", paused ? "已暂停" : "已恢复");
+    return ESP_OK;
+}
+
+esp_err_t audio_queue_wait_for_prompts_idle(uint32_t timeout_ms)
+{
+    TickType_t start_tick = xTaskGetTickCount();
+    TickType_t timeout_ticks = (timeout_ms == 0) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+
+    while (1) {
+        bool idle = false;
+
+        if (audio_queue_lock(pdMS_TO_TICKS(100))) {
+            idle = (prompt_work_count == 0);
+            audio_queue_unlock();
+        }
+
+        if (idle) {
+            return ESP_OK;
+        }
+
+        if (timeout_ms > 0 && (xTaskGetTickCount() - start_tick) >= timeout_ticks) {
+            return ESP_ERR_TIMEOUT;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+/**
+ * @brief 设置背景音乐状态
+ * @param file_path 背景音乐文件路径,NULL表示停止
+ * @param is_playing 是否正在播放
+ * @return esp_err_t 错误码
+ */
+esp_err_t audio_queue_set_background_music(const char* file_path, bool is_playing)
+{
+    if (!audio_queue_initialized) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (!audio_queue_lock(pdMS_TO_TICKS(5000))) {
+        ESP_LOGW(TAG, "设置背景音乐状态时获取互斥锁超时");
