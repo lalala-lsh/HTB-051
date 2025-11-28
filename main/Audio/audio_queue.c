@@ -663,3 +663,98 @@ esp_err_t audio_queue_set_background_music(const char* file_path, bool is_playin
 
     if (!audio_queue_lock(pdMS_TO_TICKS(5000))) {
         ESP_LOGW(TAG, "设置背景音乐状态时获取互斥锁超时");
+        return ESP_ERR_TIMEOUT;
+    }
+
+    if (file_path != NULL && is_playing) {
+        // 设置背景音乐正在播放
+        strncpy(background_music_file, file_path, sizeof(background_music_file) - 1);
+        background_music_file[sizeof(background_music_file) - 1] = '\0';
+        background_music_was_playing = true;
+        ESP_LOGD(TAG, "设置背景音乐状态: 播放中 - %s", file_path);
+    } else {
+        // 停止背景音乐
+        background_music_was_playing = false;
+        memset(background_music_file, 0, sizeof(background_music_file));
+        clear_deferred_background_unsafe();
+        ESP_LOGD(TAG, "设置背景音乐状态: 已停止");
+    }
+
+    audio_queue_unlock();
+    return ESP_OK;
+}
+
+/**
+ * @brief 设置音乐功能启用状态
+ * @param enabled true启用,false禁用
+ * @return esp_err_t 错误码
+ */
+esp_err_t audio_queue_set_music_enabled(bool enabled)
+{
+    music_enabled = enabled;
+    ESP_LOGI(TAG, "音乐功能%s", enabled ? "已启用" : "已禁用");
+
+    // 禁用时只停止受music_state控制的护眼背景音乐，专注40Hz不受该开关控制
+    if (!enabled && background_music_was_playing &&
+        strcmp(background_music_file, MUSIC_40HZ) != 0) {
+        ESP_LOGI(TAG, "停止正在播放的背景音乐");
+        audio_queue_stop();
+    }
+
+    return ESP_OK;
+}
+
+/**
+ * @brief 获取音乐功能启用状态
+ * @return true启用,false禁用
+ */
+bool audio_queue_get_music_enabled(void)
+{
+    return music_enabled;
+}
+
+/**
+ * @brief 设置语音功能启用状态
+ * @param enabled true启用,false禁用
+ * @return esp_err_t 错误码
+ */
+esp_err_t audio_queue_set_voice_enabled(bool enabled)
+{
+    voice_enabled = enabled;
+    ESP_LOGI(TAG, "语音功能%s", enabled ? "已启用" : "已禁用");
+    return ESP_OK;
+}
+
+/**
+ * @brief 获取语音功能启用状态
+ * @return true启用,false禁用
+ */
+bool audio_queue_get_voice_enabled(void)
+{
+    return voice_enabled;
+}
+
+bool audio_queue_get_background_music(char* file_path, size_t file_path_size)
+{
+    bool is_playing = false;
+
+    if (!audio_queue_initialized) {
+        return false;
+    }
+
+    if (!audio_queue_lock(pdMS_TO_TICKS(1000))) {
+        ESP_LOGW(TAG, "获取背景音乐状态时获取互斥锁超时");
+        return false;
+    }
+
+    is_playing = background_music_was_playing && background_music_file[0] != '\0';
+    if (is_playing && file_path != NULL && file_path_size > 0) {
+        strncpy(file_path, background_music_file, file_path_size - 1);
+        file_path[file_path_size - 1] = '\0';
+    } else if (file_path != NULL && file_path_size > 0) {
+        file_path[0] = '\0';
+    }
+
+    audio_queue_unlock();
+    return is_playing;
+}
