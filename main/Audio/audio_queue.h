@@ -91,3 +91,96 @@ esp_err_t audio_queue_play(const char* file_path, audio_type_t type, uint8_t pri
 esp_err_t audio_queue_play_loop(const char* file_path, audio_type_t type, uint8_t priority);
 
 /**
+ * @brief 请求播放音频循环(不受音乐功能开关限制)
+ *
+ * 用于专注模式等固定业务音频，不能被 music_state 护眼音乐开关控制。
+ *
+ * @param file_path 音频文件路径
+ * @param type 音频类型
+ * @param priority 优先级
+ * @return esp_err_t 错误码
+ */
+esp_err_t audio_queue_play_loop_force(const char* file_path, audio_type_t type, uint8_t priority);
+
+/**
+ * @brief 停止音频播放
+ * @return esp_err_t 错误码
+ */
+esp_err_t audio_queue_stop(void);
+
+/**
+ * @brief 检查指定类型音频是否在防抖期内
+ * @param type 音频类型
+ * @return true 在防抖期内,false 不在防抖期内
+ */
+bool audio_queue_is_debouncing(audio_type_t type);
+
+/**
+ * @brief 清空音频队列
+ * @return esp_err_t 错误码
+ */
+esp_err_t audio_queue_clear(void);
+
+/**
+ * @brief 设置音频队列暂停状态
+ * @param paused true暂停,false恢复
+ * @return esp_err_t 错误码
+ */
+esp_err_t audio_queue_set_paused(bool paused);
+
+/**
+ * @brief 等待当前正在播放或已排队的一次性提示音处理完
+ * @param timeout_ms 最大等待时间(毫秒)
+ * @return ESP_OK 已空闲, ESP_ERR_TIMEOUT 超时
+ */
+esp_err_t audio_queue_wait_for_prompts_idle(uint32_t timeout_ms);
+
+/**
+ * @brief 设置背景音乐状态(用于其他模块通知音频队列当前背景音乐状态)
+ * @param file_path 背景音乐文件路径,NULL表示停止
+ * @param is_playing 是否正在播放
+ * @return esp_err_t 错误码
+ */
+esp_err_t audio_queue_set_background_music(const char* file_path, bool is_playing);
+
+/**
+ * @brief 设置音乐功能启用状态
+ * @param enabled true启用,false禁用
+ * @return esp_err_t 错误码
+ * @note 禁用时会立即停止正在播放的背景音乐
+ */
+esp_err_t audio_queue_set_music_enabled(bool enabled);
+
+/**
+ * @brief 获取音乐功能启用状态
+ * @return true启用,false禁用
+ */
+bool audio_queue_get_music_enabled(void);
+
+/**
+ * @brief 设置语音功能启用状态
+ * @param enabled true启用,false禁用
+ * @return esp_err_t 错误码
+ * @note 禁用时不影响音乐播放,仅阻止TTS语音提示
+ */
+esp_err_t audio_queue_set_voice_enabled(bool enabled);
+
+/**
+ * @brief 获取语音功能启用状态
+ * @return true启用,false禁用
+ */
+bool audio_queue_get_voice_enabled(void);
+
+/**
+ * @brief 获取当前背景音乐状态快照
+ * @param file_path 输出背景音乐路径缓冲区，可为NULL
+ * @param file_path_size 路径缓冲区大小
+ * @return true 当前记录了背景音乐播放状态，false 未记录
+ */
+bool audio_queue_get_background_music(char* file_path, size_t file_path_size);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* AUDIO_QUEUE_H */
