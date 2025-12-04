@@ -122,3 +122,128 @@ static void restore_interrupted_background_music(const char *bgm_path)
         return;
     }
 
+    if (sensor_control_is_pir_dimmed()) {
+        ESP_LOGI(TAG, "PIR调暗期间，音频更新后暂不恢复背景音乐");
+        return;
+    }
+
+    if (bgm_path == NULL || bgm_path[0] == '\0') {
+        ESP_LOGD(TAG, "音频更新前无背景音乐，更新后不主动启动");
+        return;
+    }
+
+    if (strcmp(bgm_path, MUSIC) == 0 && !audio_queue_get_music_enabled()) {
+        ESP_LOGD(TAG, "护眼音乐功能已禁用，音频更新后不恢复护眼背景音乐");
+        return;
+    }
+
+    audio_queue_set_background_music(bgm_path, true);
+    if (strcmp(bgm_path, MUSIC_40HZ) == 0) {
+        audio_queue_play_loop_force(bgm_path, AUDIO_TYPE_MUSIC_CTRL, AUDIO_PRIORITY_LOW);
+    } else {
+        audio_queue_play_loop(bgm_path, AUDIO_TYPE_MUSIC_CTRL, AUDIO_PRIORITY_LOW);
+    }
+    ESP_LOGI(TAG, "音频更新完成，恢复被打断前背景音乐: %s", bgm_path);
+}
+
+// #region agent log
+static void debug_log(const char *run_id, const char *hypothesis_id, const char *location,
+                      const char *message, const char *data_json)
+{
+    FILE *fp = fopen(DEBUG_LOG_PATH, "a");
+    if (fp == NULL) {
+        return;
+    }
+    fprintf(fp,
+            "{\"sessionId\":\"%s\",\"runId\":\"%s\",\"hypothesisId\":\"%s\",\"location\":\"%s\","
+            "\"message\":\"%s\",\"data\":%s,\"timestamp\":%lld}\n",
+            DEBUG_SESSION_ID, run_id, hypothesis_id, location, message,
+            (data_json != NULL) ? data_json : "{}",
+            (long long)(esp_timer_get_time() / 1000));
+    fclose(fp);
+}
+// #endregion
+
+static esp_err_t ensure_state_mutex(void)
+{
+    if (s_state_mutex != NULL) {
+        return ESP_OK;
+    }
+
+    s_state_mutex = xSemaphoreCreateMutex();
+    if (s_state_mutex == NULL) {
+        ESP_LOGE(TAG, "创建状态互斥锁失败");
+        return ESP_ERR_NO_MEM;
+    }
+
+    return ESP_OK;
+}
+
+static bool set_update_running(bool running)
+{
+    if (ensure_state_mutex() != ESP_OK) {
+        return false;
+    }
+
+    if (xSemaphoreTake(s_state_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        ESP_LOGW(TAG, "获取状态锁超时");
+        return false;
+    }
+
+    if (running && s_update_running) {
+        xSemaphoreGive(s_state_mutex);
+        return false;
+    }
+
+    s_update_running = running;
+    xSemaphoreGive(s_state_mutex);
+    return true;
+}
+
+bool audio_update_is_running(void)
+{
+    if (ensure_state_mutex() != ESP_OK) {
+        return false;
+    }
+
+    if (xSemaphoreTake(s_state_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return false;
+    }
+    bool running = s_update_running;
+    xSemaphoreGive(s_state_mutex);
+    return running;
+}
+
+static bool is_hex_string_32(const char *md5)
+{
+    if (md5 == NULL || strlen(md5) != AUDIO_UPDATE_MD5_LEN) {
+        return false;
+    }
+
+    for (int i = 0; i < AUDIO_UPDATE_MD5_LEN; ++i) {
+        if (!isxdigit((int)md5[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+static int hex_to_int(char c)
+{
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return 10 + c - 'a';
+    }
+    if (c >= 'A' && c <= 'F') {
+        return 10 + c - 'A';
+    }
+    return -1;
+}
+
+static bool url_decode(const char *src, char *dst, size_t dst_len)
+{
+    size_t si = 0;
+    size_t di = 0;
+
