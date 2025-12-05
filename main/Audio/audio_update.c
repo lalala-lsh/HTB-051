@@ -247,3 +247,127 @@ static bool url_decode(const char *src, char *dst, size_t dst_len)
     size_t si = 0;
     size_t di = 0;
 
+    if (src == NULL || dst == NULL || dst_len == 0) {
+        return false;
+    }
+
+    while (src[si] != '\0') {
+        if (di + 1 >= dst_len) {
+            return false;
+        }
+
+        if (src[si] == '%') {
+            int hi = hex_to_int(src[si + 1]);
+            int lo = hex_to_int(src[si + 2]);
+            if (hi < 0 || lo < 0) {
+                return false;
+            }
+            dst[di++] = (char)((hi << 4) | lo);
+            si += 3;
+            continue;
+        }
+
+        dst[di++] = src[si++];
+    }
+
+    dst[di] = '\0';
+    return true;
+}
+
+static bool ends_with_mp3(const char *name)
+{
+    size_t len = strlen(name);
+    if (len < 4) {
+        return false;
+    }
+
+    return (tolower((unsigned char)name[len - 4]) == '.') &&
+           (tolower((unsigned char)name[len - 3]) == 'm') &&
+           (tolower((unsigned char)name[len - 2]) == 'p') &&
+           (tolower((unsigned char)name[len - 1]) == '3');
+}
+
+static bool validate_file_name(const char *file_name)
+{
+    size_t i;
+    size_t len;
+
+    if (file_name == NULL) {
+        return false;
+    }
+
+    len = strlen(file_name);
+    if (len == 0 || len > AUDIO_UPDATE_MAX_FILE_LEN) {
+        return false;
+    }
+
+    if (!ends_with_mp3(file_name)) {
+        return false;
+    }
+
+    if (strstr(file_name, "..") != NULL) {
+        return false;
+    }
+
+    for (i = 0; i < len; ++i) {
+        char c = file_name[i];
+        if (c == '/' || c == '\\') {
+            return false;
+        }
+        if (!(isalnum((unsigned char)c) || c == '_' || c == '-' || c == '.')) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static bool parse_file_name_from_url(const char *url, char *file_name, size_t file_name_len)
+{
+    const char *scan_start;
+    const char *path_start;
+    const char *path_end;
+    const char *base;
+    size_t base_len;
+    char encoded_name[AUDIO_UPDATE_MAX_FILE_LEN + 1];
+
+    if (url == NULL || file_name == NULL || file_name_len == 0) {
+        return false;
+    }
+
+    scan_start = strstr(url, "://");
+    scan_start = (scan_start != NULL) ? (scan_start + 3) : url;
+    path_start = strchr(scan_start, '/');
+    if (path_start == NULL) {
+        return false;
+    }
+
+    path_end = path_start;
+    while (*path_end != '\0' && *path_end != '?' && *path_end != '#') {
+        ++path_end;
+    }
+
+    if (path_end <= path_start + 1) {
+        return false;
+    }
+
+    base = path_end - 1;
+    while (base > path_start && *(base - 1) != '/') {
+        --base;
+    }
+
+    base_len = (size_t)(path_end - base);
+    if (base_len == 0 || base_len > AUDIO_UPDATE_MAX_FILE_LEN) {
+        return false;
+    }
+
+    memcpy(encoded_name, base, base_len);
+    encoded_name[base_len] = '\0';
+
+    if (!url_decode(encoded_name, file_name, file_name_len)) {
+        return false;
+    }
+
+    return validate_file_name(file_name);
+}
+
