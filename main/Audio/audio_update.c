@@ -371,3 +371,127 @@ static bool parse_file_name_from_url(const char *url, char *file_name, size_t fi
     return validate_file_name(file_name);
 }
 
+static void md5_to_hex(const unsigned char *md5, char *output)
+{
+    static const char *hex = "0123456789abcdef";
+    for (int i = 0; i < 16; ++i) {
+        output[i * 2] = hex[(md5[i] >> 4) & 0x0F];
+        output[i * 2 + 1] = hex[md5[i] & 0x0F];
+    }
+    output[32] = '\0';
+}
+
+static esp_err_t calculate_file_md5(const char *path, char *md5_out, size_t md5_out_len)
+{
+    FILE *fp = NULL;
+    uint8_t *buf = NULL;
+    size_t read_len;
+    mbedtls_md_context_t ctx;
+    unsigned char digest[16];
+    const mbedtls_md_info_t *info = NULL;
+    esp_err_t ret = ESP_FAIL;
+
+    if (path == NULL || md5_out == NULL || md5_out_len < 33) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    fp = fopen(path, "rb");
+    if (fp == NULL) {
+        return ESP_ERR_NOT_FOUND;
+    }
+
+    buf = (uint8_t *)heap_caps_malloc(AUDIO_UPDATE_BUF_SIZE, MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        fclose(fp);
+        ESP_LOGE(TAG, "MD5缓冲区分配失败");
+        return ESP_ERR_NO_MEM;
+    }
+
+    info = mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
+    if (info == NULL) {
+        ret = ESP_FAIL;
+        goto cleanup;
+    }
+
+    mbedtls_md_init(&ctx);
+    if (mbedtls_md_setup(&ctx, info, 0) != 0) {
+        ret = ESP_FAIL;
+        goto cleanup_md;
+    }
+    if (mbedtls_md_starts(&ctx) != 0) {
+        ret = ESP_FAIL;
+        goto cleanup_md_setup;
+    }
+
+    while ((read_len = fread(buf, 1, AUDIO_UPDATE_BUF_SIZE, fp)) > 0) {
+        if (mbedtls_md_update(&ctx, buf, read_len) != 0) {
+            ret = ESP_FAIL;
+            goto cleanup_md_setup;
+        }
+    }
+
+    if (ferror(fp)) {
+        ret = ESP_FAIL;
+        goto cleanup_md_setup;
+    }
+
+    if (mbedtls_md_finish(&ctx, digest) != 0) {
+        ret = ESP_FAIL;
+        goto cleanup_md_setup;
+    }
+
+    md5_to_hex(digest, md5_out);
+    ret = ESP_OK;
+
+cleanup_md_setup:
+    mbedtls_md_free(&ctx);
+cleanup_md:
+cleanup:
+    free(buf);
+    fclose(fp);
+    return ret;
+}
+
+static esp_err_t build_paths(const char *file_name, char *target_path, size_t target_len,
+                             char *tmp_path, size_t tmp_len)
+{
+    int target_written;
+    int tmp_written;
+
+    target_written = snprintf(target_path, target_len, "/spiffs/%s", file_name);
+    if (target_written <= 0 || (size_t)target_written >= target_len) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    tmp_written = snprintf(tmp_path, tmp_len, "/spiffs/%s%s%s", AUDIO_UPDATE_TMP_PREFIX, file_name,
+                           AUDIO_UPDATE_TMP_SUFFIX);
+    if (tmp_written <= 0 || (size_t)tmp_written >= tmp_len) {
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    return ESP_OK;
+}
+
+static bool file_exists(const char *path)
+{
+    struct stat st;
+    return (path != NULL && stat(path, &st) == 0);
+}
+
+static esp_err_t copy_file(const char *src, const char *dst)
+{
+    FILE *in = NULL;
+    FILE *out = NULL;
+    uint8_t *buf = NULL;
+    size_t n;
+    esp_err_t ret = ESP_FAIL;
+
+    in = fopen(src, "rb");
+    if (in == NULL) {
+        return ESP_FAIL;
+    }
+
+    out = fopen(dst, "wb");
+    if (out == NULL) {
+        fclose(in);
+        return ESP_FAIL;
