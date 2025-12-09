@@ -495,3 +495,128 @@ static esp_err_t copy_file(const char *src, const char *dst)
     if (out == NULL) {
         fclose(in);
         return ESP_FAIL;
+    }
+
+    buf = (uint8_t *)heap_caps_malloc(AUDIO_UPDATE_BUF_SIZE, MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        fclose(in);
+        fclose(out);
+        return ESP_ERR_NO_MEM;
+    }
+
+    while ((n = fread(buf, 1, AUDIO_UPDATE_BUF_SIZE, in)) > 0) {
+        if (fwrite(buf, 1, n, out) != n) {
+            goto cleanup;
+        }
+    }
+
+    if (ferror(in) || fflush(out) != 0) {
+        goto cleanup;
+    }
+
+    ret = ESP_OK;
+
+cleanup:
+    free(buf);
+    fclose(in);
+    fclose(out);
+    return ret;
+}
+
+static bool has_enough_space(size_t expected_size)
+{
+    size_t total = 0;
+    size_t used = 0;
+    size_t free_space;
+    size_t required = expected_size + AUDIO_UPDATE_SPACE_MARGIN;
+
+    if (esp_spiffs_info("audio", &total, &used) != ESP_OK) {
+        ESP_LOGW(TAG, "获取SPIFFS空间信息失败，默认视为不足");
+        return false;
+    }
+
+    free_space = (total > used) ? (total - used) : 0;
+    ESP_LOGI(TAG, "SPIFFS容量检查: total=%u used=%u free=%u required=%u",
+             (unsigned int)total, (unsigned int)used, (unsigned int)free_space,
+             (unsigned int)required);
+    return free_space >= required;
+}
+
+static bool is_music_file(const char *file_name)
+{
+    return (file_name != NULL && strcasecmp(file_name, "music.mp3") == 0);
+}
+
+static bool is_music_cleanup_done(void)
+{
+    settings_t *settings = settings_start(AUDIO_UPDATE_MIGRATION_NS, true);
+    bool done = false;
+
+    if (settings == NULL) {
+        ESP_LOGW(TAG, "读取music一次性标记失败，默认按未执行处理");
+        return false;
+    }
+
+    done = settings_get_bool(settings, AUDIO_UPDATE_MUSIC_CLEANUP_KEY, false);
+    settings_end(settings);
+    return done;
+}
+
+static void mark_music_cleanup_done(void)
+{
+    settings_t *settings = settings_start(AUDIO_UPDATE_MIGRATION_NS, true);
+
+    if (settings == NULL) {
+        ESP_LOGW(TAG, "写入music一次性标记失败");
+        return;
+    }
+
+    settings_set_bool(settings, AUDIO_UPDATE_MUSIC_CLEANUP_KEY, true);
+    settings_end(settings);
+}
+
+/**
+ * @brief 一次性迁移：删除旧 music.mp3 释放空间（仅执行一次）
+ * @note 仅做删除动作，不在此处写“已完成”标记。标记由下载并替换成功后再写入。
+ */
+static bool run_one_time_music_cleanup_if_needed(const char *target_path)
+{
+    if (target_path != NULL && file_exists(target_path)) {
+        if (unlink(target_path) == 0) {
+            ESP_LOGI(TAG, "一次性music清理：已删除旧music文件: %s", target_path);
+            return true;
+        }
+        ESP_LOGW(TAG, "一次性music清理：删除旧文件失败: %s errno=%d", target_path, errno);
+        return false;
+    }
+    ESP_LOGI(TAG, "一次性music清理：旧music文件不存在，视为已清理");
+    return true;
+}
+
+static esp_err_t replace_target_file(const char *tmp_path, const char *target_path)
+{
+    char backup_path[180];
+    int backup_written;
+    int rename_err = 0;
+    bool target_exists = false;
+    bool tmp_exists = false;
+
+    if (rename(tmp_path, target_path) == 0) {
+        return ESP_OK;
+    }
+    rename_err = errno;
+    target_exists = file_exists(target_path);
+    tmp_exists = file_exists(tmp_path);
+
+    if (!tmp_exists) {
+        ESP_LOGE(TAG, "替换失败，临时文件不存在: %s", tmp_path);
+        return ESP_FAIL;
+    }
+
+    /* 新增文件场景：目标不存在时直接复制落盘 */
+    if (!target_exists) {
+        if (copy_file(tmp_path, target_path) == ESP_OK) {
+            unlink(tmp_path);
+            ESP_LOGI(TAG, "rename失败已恢复(copy写入): target=%s errno=%d", target_path, rename_err);
+            return ESP_OK;
+        }
