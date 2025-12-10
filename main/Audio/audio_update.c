@@ -620,3 +620,127 @@ static esp_err_t replace_target_file(const char *tmp_path, const char *target_pa
             ESP_LOGI(TAG, "rename失败已恢复(copy写入): target=%s errno=%d", target_path, rename_err);
             return ESP_OK;
         }
+        ESP_LOGE(TAG, "目标不存在且复制失败: %s", target_path);
+        return ESP_FAIL;
+    }
+
+    /* 覆盖场景：先备份旧文件，失败时可回滚 */
+    backup_written = snprintf(backup_path, sizeof(backup_path), "%s.bak", target_path);
+    if (backup_written <= 0 || backup_written >= (int)sizeof(backup_path)) {
+        ESP_LOGE(TAG, "备份路径构建失败: %s", target_path);
+        return ESP_FAIL;
+    }
+
+    unlink(backup_path);
+    if (rename(target_path, backup_path) != 0) {
+        ESP_LOGE(TAG, "备份旧文件失败: %s errno=%d", target_path, errno);
+        return ESP_FAIL;
+    }
+
+    if (rename(tmp_path, target_path) != 0) {
+        int rename_err2 = errno;
+        if (copy_file(tmp_path, target_path) != ESP_OK) {
+            ESP_LOGE(TAG, "复制替换失败，执行回滚: %s", target_path);
+            rename(backup_path, target_path);
+            return ESP_FAIL;
+        }
+        ESP_LOGI(TAG, "rename失败已恢复(copy覆盖): target=%s errno_first=%d errno_second=%d",
+                 target_path, rename_err, rename_err2);
+    }
+
+    unlink(tmp_path);
+    unlink(backup_path);
+    return ESP_OK;
+}
+
+static esp_err_t download_to_temp_and_verify(const audio_update_item_t *item, const char *tmp_path)
+{
+    esp_http_client_handle_t client = NULL;
+    esp_http_client_config_t config = {
+        .url = item->url,
+        .timeout_ms = 10000,
+        .keep_alive_enable = true,
+        .skip_cert_common_name_check = true,
+    };
+    uint8_t *buf = NULL;
+    FILE *fp = NULL;
+    esp_err_t ret = ESP_FAIL;
+    size_t written = 0;
+    int read_len;
+    int loop_cnt = 0;
+    int status_code = -1;
+    int content_length = -1;
+    bool is_chunked = false;
+    bool first_chunk_logged = false;
+    mbedtls_md_context_t md_ctx;
+    const mbedtls_md_info_t *md_info = NULL;
+    unsigned char md5_bin[16];
+    char md5_hex[33];
+
+    unlink(tmp_path);
+
+    client = esp_http_client_init(&config);
+    if (client == NULL) {
+        ESP_LOGE(TAG, "HTTP client 初始化失败");
+        return ESP_FAIL;
+    }
+
+    if (esp_http_client_open(client, 0) != ESP_OK) {
+        ESP_LOGE(TAG, "HTTP连接失败: %s", item->url);
+        // #region agent log
+        debug_log("run3", "H2", "audio_update.c:download_to_temp_and_verify",
+                  "http_open_failed", "{\"step\":\"open\"}");
+        // #endregion
+        goto cleanup;
+    }
+    content_length = esp_http_client_fetch_headers(client);
+    status_code = esp_http_client_get_status_code(client);
+    is_chunked = esp_http_client_is_chunked_response(client);
+    // #region agent log
+    {
+        char data[224];
+        snprintf(data, sizeof(data),
+                 "{\"file\":\"%s\",\"statusCode\":%d,\"contentLength\":%d,\"chunked\":%s,"
+                 "\"expectedSize\":%u}",
+                 item->file_name, status_code, content_length, is_chunked ? "true" : "false",
+                 (unsigned int)item->size);
+        debug_log("run3", "H1", "audio_update.c:download_to_temp_and_verify", "http_headers", data);
+    }
+    // #endregion
+
+    fp = fopen(tmp_path, "wb");
+    if (fp == NULL) {
+        ESP_LOGE(TAG, "打开临时文件失败: %s", tmp_path);
+        goto cleanup;
+    }
+
+    buf = (uint8_t *)heap_caps_malloc(AUDIO_UPDATE_BUF_SIZE, MALLOC_CAP_8BIT);
+    if (buf == NULL) {
+        ESP_LOGE(TAG, "下载缓冲区分配失败");
+        ret = ESP_ERR_NO_MEM;
+        goto cleanup;
+    }
+
+    md_info = mbedtls_md_info_from_type(MBEDTLS_MD_MD5);
+    mbedtls_md_init(&md_ctx);
+    if (md_info == NULL || mbedtls_md_setup(&md_ctx, md_info, 0) != 0 ||
+        mbedtls_md_starts(&md_ctx) != 0) {
+        ESP_LOGE(TAG, "MD5初始化失败");
+        goto cleanup_md;
+    }
+
+    while ((read_len = esp_http_client_read(client, (char *)buf, AUDIO_UPDATE_BUF_SIZE)) > 0) {
+        if (!first_chunk_logged) {
+            // #region agent log
+            char data[128];
+            snprintf(data, sizeof(data), "{\"file\":\"%s\",\"firstReadLen\":%d}", item->file_name,
+                     read_len);
+            debug_log("run3", "H1", "audio_update.c:download_to_temp_and_verify", "first_chunk", data);
+            // #endregion
+            first_chunk_logged = true;
+        }
+        size_t write_len = fwrite(buf, 1, (size_t)read_len, fp);
+        if (write_len != (size_t)read_len) {
+            ESP_LOGE(TAG, "写入临时文件失败");
+            goto cleanup_md_setup;
+        }
