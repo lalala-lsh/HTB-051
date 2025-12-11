@@ -744,3 +744,127 @@ static esp_err_t download_to_temp_and_verify(const audio_update_item_t *item, co
             ESP_LOGE(TAG, "写入临时文件失败");
             goto cleanup_md_setup;
         }
+
+        if (mbedtls_md_update(&md_ctx, buf, (size_t)read_len) != 0) {
+            ESP_LOGE(TAG, "MD5更新失败");
+            goto cleanup_md_setup;
+        }
+
+        written += (size_t)read_len;
+
+        if ((++loop_cnt % 8) == 0) {
+            vTaskDelay(pdMS_TO_TICKS(1));
+        }
+    }
+
+    if (read_len < 0) {
+        ESP_LOGE(TAG, "HTTP读取失败");
+        // #region agent log
+        {
+            char data[160];
+            snprintf(data, sizeof(data), "{\"file\":\"%s\",\"readLen\":%d,\"statusCode\":%d}",
+                     item->file_name, read_len, status_code);
+            debug_log("run3", "H2", "audio_update.c:download_to_temp_and_verify", "http_read_failed", data);
+        }
+        // #endregion
+        goto cleanup_md_setup;
+    }
+    // #region agent log
+    {
+        char data[176];
+        snprintf(data, sizeof(data),
+                 "{\"file\":\"%s\",\"written\":%u,\"expectedSize\":%u,\"statusCode\":%d}",
+                 item->file_name, (unsigned int)written, (unsigned int)item->size, status_code);
+        debug_log("run3", "H1", "audio_update.c:download_to_temp_and_verify", "download_finished", data);
+    }
+    // #endregion
+
+    if (fflush(fp) != 0) {
+        ESP_LOGE(TAG, "刷新临时文件失败");
+        goto cleanup_md_setup;
+    }
+
+    if (mbedtls_md_finish(&md_ctx, md5_bin) != 0) {
+        ESP_LOGE(TAG, "MD5结束失败");
+        goto cleanup_md_setup;
+    }
+
+    md5_to_hex(md5_bin, md5_hex);
+
+    if (written != item->size) {
+        ESP_LOGE(TAG, "文件大小校验失败: written=%u expected=%u",
+                 (unsigned int)written, (unsigned int)item->size);
+        // #region agent log
+        {
+            char data[224];
+            snprintf(data, sizeof(data),
+                     "{\"file\":\"%s\",\"written\":%u,\"expectedSize\":%u,\"statusCode\":%d,"
+                     "\"contentLength\":%d}",
+                     item->file_name, (unsigned int)written, (unsigned int)item->size, status_code,
+                     content_length);
+            debug_log("run3", "H1", "audio_update.c:download_to_temp_and_verify", "size_mismatch", data);
+        }
+        // #endregion
+        goto cleanup_md_setup;
+    }
+
+    if (strcasecmp(md5_hex, item->md5) != 0) {
+        ESP_LOGE(TAG, "MD5校验失败: got=%s expected=%s", md5_hex, item->md5);
+        goto cleanup_md_setup;
+    }
+
+    ret = ESP_OK;
+
+cleanup_md_setup:
+    mbedtls_md_free(&md_ctx);
+cleanup_md:
+cleanup:
+    if (fp != NULL) {
+        fclose(fp);
+    }
+    if (client != NULL) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+    }
+    free(buf);
+
+    if (ret != ESP_OK) {
+        unlink(tmp_path);
+    }
+
+    return ret;
+}
+
+static void cleanup_temp_files(void)
+{
+    DIR *dir = opendir("/spiffs");
+    struct dirent *entry;
+
+    if (dir == NULL) {
+        ESP_LOGW(TAG, "打开/spiffs目录失败，跳过tmp清理");
+        return;
+    }
+
+    while ((entry = readdir(dir)) != NULL) {
+        char *name = entry->d_name;
+        char path[160];
+        size_t name_len = strlen(name);
+        size_t suffix_len = strlen(AUDIO_UPDATE_TMP_SUFFIX);
+        int n;
+
+        if (name_len <= suffix_len) {
+            continue;
+        }
+        if (strncmp(name, AUDIO_UPDATE_TMP_PREFIX, strlen(AUDIO_UPDATE_TMP_PREFIX)) != 0) {
+            continue;
+        }
+        if (strcmp(name + name_len - suffix_len, AUDIO_UPDATE_TMP_SUFFIX) != 0) {
+            continue;
+        }
+
+        n = snprintf(path, sizeof(path), "/spiffs/%s", name);
+        if (n <= 0 || n >= (int)sizeof(path)) {
+            continue;
+        }
+
+        if (unlink(path) == 0) {
