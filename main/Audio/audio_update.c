@@ -868,3 +868,128 @@ static void cleanup_temp_files(void)
         }
 
         if (unlink(path) == 0) {
+            ESP_LOGI(TAG, "清理遗留临时文件: %s", path);
+        }
+    }
+
+    closedir(dir);
+}
+
+static esp_err_t process_one_item(const audio_update_item_t *item)
+{
+    char target_path[160];
+    char tmp_path[160];
+    char local_md5[33];
+    esp_err_t ret;
+    bool should_mark_music_cleanup_done = false;
+
+    if (heap_caps_get_free_size(MALLOC_CAP_8BIT) < AUDIO_UPDATE_MIN_FREE_HEAP) {
+        ESP_LOGW(TAG, "可用堆内存不足，跳过文件更新: %s", item->file_name);
+        return ESP_ERR_NO_MEM;
+    }
+
+    ret = build_paths(item->file_name, target_path, sizeof(target_path), tmp_path, sizeof(tmp_path));
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "构建文件路径失败: %s", item->file_name);
+        return ret;
+    }
+
+    ret = calculate_file_md5(target_path, local_md5, sizeof(local_md5));
+    if (ret == ESP_OK && strcasecmp(local_md5, item->md5) == 0) {
+        ESP_LOGI(TAG, "本地MD5一致，跳过更新: %s", item->file_name);
+        return ESP_OK;
+    }
+
+    /* 一次性迁移逻辑：music.mp3 且需要更新时，先删旧文件腾空间 */
+    if (is_music_file(item->file_name)) {
+        if (!is_music_cleanup_done()) {
+            if (run_one_time_music_cleanup_if_needed(target_path)) {
+                should_mark_music_cleanup_done = true;
+            }
+        }
+    }
+
+    if (!has_enough_space(item->size)) {
+        ESP_LOGW(TAG, "SPIFFS空间不足，跳过更新: %s", item->file_name);
+        return ESP_ERR_NO_MEM;
+    }
+
+    ESP_LOGI(TAG, "开始下载音频文件: %s", item->file_name);
+    ret = download_to_temp_and_verify(item, tmp_path);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "下载或校验失败: %s", item->file_name);
+        return ret;
+    }
+
+    ret = replace_target_file(tmp_path, target_path);
+    if (ret != ESP_OK) {
+        unlink(tmp_path);
+        ESP_LOGE(TAG, "替换文件失败，保留旧文件: %s", item->file_name);
+        return ret;
+    }
+
+    if (is_music_file(item->file_name) && should_mark_music_cleanup_done) {
+        mark_music_cleanup_done();
+        ESP_LOGI(TAG, "一次性music清理标记已写入");
+    }
+
+    ESP_LOGI(TAG, "音频文件更新成功: %s", item->file_name);
+    return ESP_OK;
+}
+
+static void audio_update_task(void *arg)
+{
+    audio_update_ctx_t *ctx = (audio_update_ctx_t *)arg;
+    mp3_player_state_t pre_state;
+    char interrupted_bgm[128] = {0};
+    bool had_interrupted_bgm = false;
+
+    if (ctx == NULL) {
+        set_update_running(false);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    cleanup_temp_files();
+
+    if (filter_items_needing_update(ctx) == 0) {
+        ESP_LOGI(TAG, "所有音频文件均无需更新，不打断当前播放");
+        cleanup_temp_files();
+        free(ctx->items);
+        free(ctx);
+        set_update_running(false);
+        vTaskDelete(NULL);
+        return;
+    }
+
+    wait_prompt_audio_before_update();
+
+    had_interrupted_bgm = audio_queue_get_background_music(interrupted_bgm, sizeof(interrupted_bgm));
+    audio_queue_set_paused(true);
+    pre_state = mp3_player_get_state();
+    if (pre_state == MP3_PLAYER_STATE_PLAYING || pre_state == MP3_PLAYER_STATE_PAUSED) {
+        audio_queue_stop();
+    } else {
+        /* 未在播放时避免触发 mp3_player_stop 的无害告警，同时保持队列/背景状态一致 */
+        audio_queue_clear();
+        audio_queue_set_background_music(NULL, false);
+    }
+
+    for (size_t i = 0; i < ctx->item_count; ++i) {
+        process_one_item(&ctx->items[i]);
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    cleanup_temp_files();
+    audio_queue_set_paused(false);
+    restore_interrupted_background_music(had_interrupted_bgm ? interrupted_bgm : NULL);
+
+    free(ctx->items);
+    free(ctx);
+    set_update_running(false);
+    vTaskDelete(NULL);
+}
+
+static bool parse_item_from_json(const cJSON *json_item, audio_update_item_t *out)
+{
+    cJSON *url_obj;
