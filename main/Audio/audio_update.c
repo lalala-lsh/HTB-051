@@ -993,3 +993,127 @@ static void audio_update_task(void *arg)
 static bool parse_item_from_json(const cJSON *json_item, audio_update_item_t *out)
 {
     cJSON *url_obj;
+    cJSON *md5_obj;
+    cJSON *size_obj;
+    int size_int;
+
+    if (json_item == NULL || out == NULL) {
+        return false;
+    }
+
+    url_obj = cJSON_GetObjectItem((cJSON *)json_item, "url");
+    md5_obj = cJSON_GetObjectItem((cJSON *)json_item, "md5");
+    size_obj = cJSON_GetObjectItem((cJSON *)json_item, "size");
+
+    if (!cJSON_IsString(url_obj) || !cJSON_IsString(md5_obj) || !cJSON_IsNumber(size_obj)) {
+        return false;
+    }
+
+    if (strlen(url_obj->valuestring) == 0 || strlen(url_obj->valuestring) > AUDIO_UPDATE_MAX_URL_LEN) {
+        return false;
+    }
+
+    if (!is_hex_string_32(md5_obj->valuestring)) {
+        return false;
+    }
+
+    size_int = size_obj->valueint;
+    if (size_int <= 0) {
+        return false;
+    }
+
+    if (!parse_file_name_from_url(url_obj->valuestring, out->file_name, sizeof(out->file_name))) {
+        return false;
+    }
+
+    strncpy(out->url, url_obj->valuestring, sizeof(out->url) - 1);
+    out->url[sizeof(out->url) - 1] = '\0';
+
+    strncpy(out->md5, md5_obj->valuestring, sizeof(out->md5) - 1);
+    out->md5[sizeof(out->md5) - 1] = '\0';
+
+    out->size = (size_t)size_int;
+    return true;
+}
+
+esp_err_t audio_update_init(void)
+{
+    if (ensure_state_mutex() != ESP_OK) {
+        return ESP_FAIL;
+    }
+
+    cleanup_temp_files();
+    return ESP_OK;
+}
+
+esp_err_t audio_update_start_from_json(const cJSON *audio_array)
+{
+    audio_update_ctx_t *ctx = NULL;
+    int count;
+    int valid_count = 0;
+    int idx;
+
+    if (!cJSON_IsArray((cJSON *)audio_array)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!set_update_running(true)) {
+        ESP_LOGW(TAG, "音频更新任务已在运行，忽略本次请求");
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    count = cJSON_GetArraySize((cJSON *)audio_array);
+    if (count <= 0) {
+        ESP_LOGI(TAG, "AUDIO数组为空，无需更新");
+        set_update_running(false);
+        return ESP_OK;
+    }
+
+    ctx = (audio_update_ctx_t *)calloc(1, sizeof(audio_update_ctx_t));
+    if (ctx == NULL) {
+        set_update_running(false);
+        return ESP_ERR_NO_MEM;
+    }
+
+    ctx->items = (audio_update_item_t *)calloc((size_t)count, sizeof(audio_update_item_t));
+    if (ctx->items == NULL) {
+        free(ctx);
+        set_update_running(false);
+        return ESP_ERR_NO_MEM;
+    }
+
+    for (idx = 0; idx < count; ++idx) {
+        cJSON *json_item = cJSON_GetArrayItem((cJSON *)audio_array, idx);
+        audio_update_item_t item;
+
+        memset(&item, 0, sizeof(item));
+        if (!parse_item_from_json(json_item, &item)) {
+            ESP_LOGW(TAG, "无效的AUDIO项，已跳过，index=%d", idx);
+            continue;
+        }
+
+        ctx->items[valid_count++] = item;
+    }
+
+    if (valid_count == 0) {
+        ESP_LOGW(TAG, "AUDIO数组中无有效条目");
+        free(ctx->items);
+        free(ctx);
+        set_update_running(false);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    ctx->item_count = (size_t)valid_count;
+
+    if (xTaskCreate(audio_update_task, "audio_update_task", AUDIO_UPDATE_STACK_SIZE, ctx,
+                    AUDIO_UPDATE_PRIORITY, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "创建音频更新任务失败");
+        free(ctx->items);
+        free(ctx);
+        set_update_running(false);
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "音频更新任务启动，待处理文件数: %d", valid_count);
+    return ESP_OK;
+}
