@@ -256,3 +256,133 @@ static esp_err_t mp3_player_create_pipeline(void)
     // 增加SPIFFS流缓冲区大小,提高读取性能
     flash_cfg.out_rb_size = 8192;  // 增大输出缓冲区
     flash_cfg.task_stack = 4096;   // 增加任务栈大小
+    flash_cfg.task_prio = 8;       // 提高读取任务优先级
+    g_mp3_player->spiffs_stream_reader = spiffs_stream_init(&flash_cfg);
+    if (!g_mp3_player->spiffs_stream_reader) {
+        ESP_LOGE(TAG, "创建spiffs流失败");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGD(TAG, "[3.2] 创建i2s流向编解码芯片写入数据");
+#if defined CONFIG_ESP32_C3_LYRA_V2_BOARD
+    i2s_stream_cfg_t i2s_cfg = I2S_STREAM_PDM_TX_CFG_DEFAULT();
+#else
+    i2s_stream_cfg_t i2s_cfg = I2S_STREAM_CFG_DEFAULT();
+#endif
+    i2s_cfg.type = AUDIO_STREAM_WRITER;
+    // 优化I2S流配置,减少音频卡顿
+    i2s_cfg.task_stack = 4096;               // 增加任务栈大小
+    i2s_cfg.task_prio = 9;                   // 提高I2S任务优先级
+    i2s_cfg.out_rb_size = 8192;              // 增大输出缓冲区
+    g_mp3_player->i2s_stream_writer = i2s_stream_init(&i2s_cfg);
+    if (!g_mp3_player->i2s_stream_writer) {
+        ESP_LOGE(TAG, "创建i2s流失败");
+        return ESP_FAIL;
+    }
+
+    // 设置默认音频参数:16000Hz, 1声道, 16位
+    // 这是必需的,否则 I2S 启动时会产生杂音
+    ESP_LOGD(TAG, "[3.2.1] 设置默认i2s参数: 16000Hz, 16位, 1声道");
+    esp_err_t i2s_ret = i2s_stream_set_clk(g_mp3_player->i2s_stream_writer, 16000, 16, 1);
+    if (i2s_ret != ESP_OK) {
+        ESP_LOGE(TAG, "默认i2s参数设置失败");
+        return ESP_FAIL;
+    }
+    cur_i2s_rate = 16000;
+    cur_i2s_bits = 16;
+    cur_i2s_ch   = 1;
+
+    ESP_LOGD(TAG, "[3.3] 创建mp3解码器解码mp3文件");
+    mp3_decoder_cfg_t mp3_cfg = DEFAULT_MP3_DECODER_CONFIG();
+    // 优化MP3解码器配置
+    mp3_cfg.task_stack = 4096;    // 增加任务栈大小
+    mp3_cfg.task_prio = 8;        // 提高解码任务优先级
+    mp3_cfg.out_rb_size = 8192;   // 增大输出缓冲区
+    mp3_cfg.task_core = 1;
+    g_mp3_player->mp3_decoder = mp3_decoder_init(&mp3_cfg);
+    if (!g_mp3_player->mp3_decoder) {
+        ESP_LOGE(TAG, "创建mp3解码器失败");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGD(TAG, "[3.4] 注册所有元素到音频管道");
+    audio_pipeline_register(g_mp3_player->pipeline, g_mp3_player->spiffs_stream_reader, "spiffs");
+    audio_pipeline_register(g_mp3_player->pipeline, g_mp3_player->mp3_decoder, "mp3");
+    audio_pipeline_register(g_mp3_player->pipeline, g_mp3_player->i2s_stream_writer, "i2s");
+
+    ESP_LOGD(TAG, "[3.5] 链接元素 [flash]-->spiffs-->mp3解码器-->i2s流-->[编解码芯片]");
+    const char *link_tag[3] = {"spiffs", "mp3", "i2s"};
+    audio_pipeline_link(g_mp3_player->pipeline, &link_tag[0], 3);
+
+    return ESP_OK;
+}
+
+/**
+ * @brief 内部函数:创建事件监听器
+ */
+static esp_err_t mp3_player_create_event_listener(void)
+{
+    if (!g_mp3_player) {
+        return ESP_FAIL;
+    }
+
+    ESP_LOGD(TAG, "[ 4 ] 设置事件监听器");
+    audio_event_iface_cfg_t evt_cfg = AUDIO_EVENT_IFACE_DEFAULT_CFG();
+    g_mp3_player->evt = audio_event_iface_init(&evt_cfg);
+    if (!g_mp3_player->evt) {
+        ESP_LOGE(TAG, "创建事件接口失败");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGD(TAG, "[4.1] 监听管道中所有元素的事件");
+    audio_pipeline_set_listener(g_mp3_player->pipeline, g_mp3_player->evt);
+
+    ESP_LOGD(TAG, "[4.2] 监听外设事件");
+    audio_event_iface_set_listener(esp_periph_set_get_event_iface(g_mp3_player->periph_set), g_mp3_player->evt);
+
+    return ESP_OK;
+}
+
+/**
+ * @brief 内部函数:销毁音频管道
+ */
+static void mp3_player_destroy_pipeline(void)
+{
+    if (!g_mp3_player) {
+        return;
+    }
+
+    if (g_mp3_player->pipeline) {
+        audio_pipeline_stop(g_mp3_player->pipeline);
+        audio_pipeline_wait_for_stop(g_mp3_player->pipeline);
+        audio_pipeline_terminate(g_mp3_player->pipeline);
+
+        if (g_mp3_player->spiffs_stream_reader) {
+            audio_pipeline_unregister(g_mp3_player->pipeline, g_mp3_player->spiffs_stream_reader);
+        }
+        if (g_mp3_player->i2s_stream_writer) {
+            audio_pipeline_unregister(g_mp3_player->pipeline, g_mp3_player->i2s_stream_writer);
+        }
+        if (g_mp3_player->mp3_decoder) {
+            audio_pipeline_unregister(g_mp3_player->pipeline, g_mp3_player->mp3_decoder);
+        }
+
+        if (g_mp3_player->evt) {
+            audio_pipeline_remove_listener(g_mp3_player->pipeline);
+        }
+
+        audio_pipeline_deinit(g_mp3_player->pipeline);
+        g_mp3_player->pipeline = NULL;
+    }
+
+    if (g_mp3_player->spiffs_stream_reader) {
+        audio_element_deinit(g_mp3_player->spiffs_stream_reader);
+        g_mp3_player->spiffs_stream_reader = NULL;
+    }
+
+    if (g_mp3_player->i2s_stream_writer) {
+        audio_element_deinit(g_mp3_player->i2s_stream_writer);
+        g_mp3_player->i2s_stream_writer = NULL;
+    }
+
+    if (g_mp3_player->mp3_decoder) {
