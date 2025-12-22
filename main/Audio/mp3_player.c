@@ -386,3 +386,132 @@ static void mp3_player_destroy_pipeline(void)
     }
 
     if (g_mp3_player->mp3_decoder) {
+        audio_element_deinit(g_mp3_player->mp3_decoder);
+        g_mp3_player->mp3_decoder = NULL;
+    }
+}
+
+/**
+ * @brief 内部函数:处理音频管道事件
+ */
+static void mp3_player_handle_audio_events(void)
+{
+    if (!mp3_player_lock()) {
+        return;
+    }
+
+    if (!mp3_player_is_enabled_unsafe()) {
+        mp3_player_unlock();
+        return;
+    }
+
+    audio_event_iface_msg_t msg;
+    esp_err_t ret = audio_event_iface_listen(g_mp3_player->evt, &msg, 0);
+
+    if (ret != ESP_OK) {
+        mp3_player_unlock();
+        return;  // 没有事件
+    }
+
+    // 处理音乐信息事件 - 动态设置采样率
+    if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT && msg.source == (void *)g_mp3_player->mp3_decoder
+        && msg.cmd == AEL_MSG_CMD_REPORT_MUSIC_INFO) {
+        audio_element_info_t music_info = {0};
+        audio_element_getinfo(g_mp3_player->mp3_decoder, &music_info);
+
+        ESP_LOGD(TAG, "音乐信息,采样率=%d,声道=%d,位深=%d",
+                 music_info.sample_rates, music_info.channels, music_info.bits);
+
+        if (music_info.sample_rates <= 0 || music_info.bits <= 0 || music_info.channels <= 0) {
+            ESP_LOGE(TAG, "MP3音频参数无效,停止当前播放");
+            mp3_player_stop_pipeline_locked(true);
+            g_mp3_player->state = MP3_PLAYER_STATE_ERROR;
+            mp3_player_unlock();
+            return;
+        }
+
+        // I2S时钟在启动播放前配置。运行中重配可能触发DMA重新分配失败并崩溃。
+        audio_element_state_t i2s_state = audio_element_get_state(g_mp3_player->i2s_stream_writer);
+        if (i2s_state != AEL_STATE_RUNNING) {
+            ESP_LOGW(TAG, "I2S流未运行(状态=%d),跳过音频参数检查", i2s_state);
+        } else if (music_info.sample_rates == cur_i2s_rate &&
+                   music_info.bits == cur_i2s_bits &&
+                   music_info.channels == cur_i2s_ch) {
+            // #region agent log (H1d)
+            // ESP_LOGI(TAG, "[DBG] I2S参数未变(rate=%d,bits=%d,ch=%d),跳过i2s_stream_set_clk",
+            //          cur_i2s_rate, cur_i2s_bits, cur_i2s_ch);
+            // #endregion
+        } else {
+            ESP_LOGE(TAG, "I2S参数不匹配,停止当前播放以避免运行中重配: current=%d/%d/%d, file=%d/%d/%d",
+                     cur_i2s_rate, cur_i2s_bits, cur_i2s_ch,
+                     music_info.sample_rates, music_info.bits, music_info.channels);
+            mp3_player_stop_pipeline_locked(true);
+            g_mp3_player->state = MP3_PLAYER_STATE_ERROR;
+            mp3_player_unlock();
+            return;
+        }
+    }
+    // 处理播放结束事件
+    else if (msg.source_type == AUDIO_ELEMENT_TYPE_ELEMENT && msg.cmd == AEL_MSG_CMD_REPORT_STATUS) {
+        intptr_t status = (intptr_t)msg.data;
+
+        if (status == AEL_STATUS_STATE_STOPPED || status == AEL_STATUS_STATE_FINISHED) {
+            if (msg.source == (void *)g_mp3_player->i2s_stream_writer) {
+                ESP_LOGD(TAG, "播放完成");
+
+                //让所有元素脱离阻塞读写
+                audio_element_set_ringbuf_done(g_mp3_player->mp3_decoder);
+                audio_element_set_ringbuf_done(g_mp3_player->i2s_stream_writer);
+                audio_element_set_ringbuf_done(g_mp3_player->spiffs_stream_reader);
+
+                if (g_mp3_player->mode == MP3_PLAYER_MODE_LOOP && g_mp3_player->state == MP3_PLAYER_STATE_PLAYING) {
+                    ESP_LOGD(TAG, "循环模式,标记延时重启");
+
+                    // 播放完成即刻静音,防止I2S停止后DMA残留噪音
+                    if (g_mp3_player->board_handle && g_mp3_player->board_handle->audio_hal) {
+                        audio_hal_set_volume(g_mp3_player->board_handle->audio_hal, 0);
+                    }
+
+                    loop_restart_pending = true;
+                    loop_restart_time = xTaskGetTickCount() + pdMS_TO_TICKS(50);
+                } else if (sequence_play_pending) {
+                    ESP_LOGD(TAG, "序列播放,准备播放第二个文件");
+
+                    // 在锁保护下处理序列播放逻辑
+                    sequence_play_pending = false;
+                    if (sequence_second_file[0] != '\0') {
+                        ESP_LOGD(TAG, "标记延时播放第二个文件: %s", sequence_second_file);
+                        // 设置循环播放标志,但使用序列播放的第二个文件
+                        strncpy(g_mp3_player->current_file, sequence_second_file, sizeof(g_mp3_player->current_file) - 1);
+                        g_mp3_player->current_file[sizeof(g_mp3_player->current_file) - 1] = '\0';
+                        g_mp3_player->mode = MP3_PLAYER_MODE_LOOP;
+                        g_mp3_player->state = MP3_PLAYER_STATE_PLAYING;  // 保持PLAYING状态
+                        loop_restart_pending = true;
+                        loop_restart_time = xTaskGetTickCount() + pdMS_TO_TICKS(300);
+                        // 清除序列播放文件缓存
+                        memset(sequence_second_file, 0, sizeof(sequence_second_file));
+                    } else {
+                        g_mp3_player->state = MP3_PLAYER_STATE_STOPPED;
+                    }
+                } else {
+                    g_mp3_player->state = MP3_PLAYER_STATE_STOPPED;
+                }
+            }
+        } else if (status > AEL_STATUS_NONE && status <= AEL_STATUS_ERROR_UNKNOWN) {
+            ESP_LOGE(TAG, "播放链路发生错误,状态=%" PRIiPTR, status);
+            loop_restart_pending = false;
+            loop_restart_time = 0;
+            sequence_play_pending = false;
+            memset(sequence_second_file, 0, sizeof(sequence_second_file));
+            g_mp3_player->state = MP3_PLAYER_STATE_ERROR;
+        }
+    }
+
+    mp3_player_unlock();
+}
+
+esp_err_t mp3_player_init(void)
+{
+    if (g_mp3_player != NULL) {
+        ESP_LOGW(TAG, "MP3播放器已经初始化");
+        return ESP_OK;
