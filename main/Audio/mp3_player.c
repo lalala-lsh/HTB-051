@@ -515,3 +515,132 @@ esp_err_t mp3_player_init(void)
     if (g_mp3_player != NULL) {
         ESP_LOGW(TAG, "MP3播放器已经初始化");
         return ESP_OK;
+    }
+
+    // 创建互斥锁
+    mp3_player_mutex = xSemaphoreCreateMutex();
+    if (!mp3_player_mutex) {
+        ESP_LOGE(TAG, "创建MP3播放器互斥锁失败");
+        return ESP_ERR_NO_MEM;
+    }
+
+    // 使用静态结构体,避免动态分配,节省内存
+    static mp3_player_t mp3_player_static;
+    g_mp3_player = &mp3_player_static;
+    memset(g_mp3_player, 0, sizeof(mp3_player_t));
+
+    // 初始化关闭标志
+    mp3_player_shutting_down = false;
+
+    // 初始化外设管理
+    ESP_LOGD(TAG, "[ 1 ] 初始化外设管理");
+    esp_periph_config_t periph_cfg = DEFAULT_ESP_PERIPH_SET_CONFIG();
+    g_mp3_player->periph_set = esp_periph_set_init(&periph_cfg);
+    if (!g_mp3_player->periph_set) {
+        ESP_LOGE(TAG, "初始化外设集失败");
+        goto init_fail;
+    }
+
+    ESP_LOGD(TAG, "[ 1.1 ] 挂载spiffs");
+    // 初始化SPIFFS外设 - 使用spiffs分区
+    periph_spiffs_cfg_t spiffs_cfg = {
+        .root = "/spiffs",
+        .partition_label = "audio",  // 修改为spiffs分区
+        .max_files = 5,
+        .format_if_mount_failed = false  // 不要格式化spiffs分区,因为里面有预装的音频文件
+    };
+    g_mp3_player->spiffs_handle = periph_spiffs_init(&spiffs_cfg);
+    if (!g_mp3_player->spiffs_handle) {
+        ESP_LOGE(TAG, "初始化spiffs外设失败");
+        goto init_fail;
+    }
+
+    // 启动SPIFFS
+    esp_periph_start(g_mp3_player->periph_set, g_mp3_player->spiffs_handle);
+
+    // 等待SPIFFS挂载成功
+    int retry_count = 0;
+    while (!periph_spiffs_is_mounted(g_mp3_player->spiffs_handle) && retry_count < 10) {
+        vTaskDelay(500 / portTICK_PERIOD_MS);
+        retry_count++;
+    }
+    if (retry_count >= 10) {
+        ESP_LOGE(TAG, "挂载spiffs文件系统失败");
+        goto init_fail;
+    }
+
+    ESP_LOGD(TAG, "[ 2 ] 启动编解码芯片");
+    g_mp3_player->board_handle = audio_board_init();
+    if (!g_mp3_player->board_handle) {
+        ESP_LOGE(TAG, "初始化音频板失败");
+        goto init_fail;
+    }
+    audio_hal_ctrl_codec(g_mp3_player->board_handle->audio_hal, AUDIO_HAL_CODEC_MODE_DECODE, AUDIO_HAL_CTRL_START);
+
+    // 创建音频管道
+    if (mp3_player_create_pipeline() != ESP_OK) {
+        ESP_LOGE(TAG, "创建音频管道失败");
+        goto init_fail;
+    }
+
+    // 创建事件监听器
+    if (mp3_player_create_event_listener() != ESP_OK) {
+        ESP_LOGE(TAG, "创建事件监听器失败");
+        goto init_fail;
+    }
+
+    // 初始化循环播放状态
+    loop_restart_pending = false;
+    loop_restart_time = 0;
+
+    // 初始化序列播放状态
+    sequence_play_pending = false;
+    memset(sequence_second_file, 0, sizeof(sequence_second_file));
+
+    // 初始化状态
+    g_mp3_player->state = MP3_PLAYER_STATE_IDLE;
+    g_mp3_player->mode = MP3_PLAYER_MODE_ONCE;
+    g_mp3_player->initialized = true;
+    g_mp3_player->enabled = true;
+    memset(g_mp3_player->current_file, 0, sizeof(g_mp3_player->current_file));
+
+    // 设置初始音量为100
+    g_mp3_player->volume = device_params_get_music_volume() * 5 + 75;
+    mp3_player_set_volume_internal(g_mp3_player->volume, false);
+
+    // 创建播放器任务(适中优先级)
+    if (xTaskCreate(mp3_player_task, "mp3_player_task", 4096, NULL, 6, &mp3_player_task_handle) != pdPASS) {
+        ESP_LOGE(TAG, "创建mp3播放器任务失败");
+        goto init_fail;
+    }
+
+    ESP_LOGI(TAG, "MP3播放器初始化成功");
+    return ESP_OK;
+
+init_fail:
+    // 设置关闭标志,避免其他线程继续访问
+    mp3_player_shutting_down = true;
+    mp3_player_deinit();
+    return ESP_FAIL;
+}
+
+esp_err_t mp3_player_play(const char *file_path)
+{
+    if (!mp3_player_is_enabled()) {
+        ESP_LOGE(TAG, "MP3播放器未初始化或已禁用");
+        return ESP_FAIL;
+    }
+
+    if (!file_path) {
+        ESP_LOGE(TAG, "无效的文件路径");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!mp3_player_lock()) {
+        ESP_LOGE(TAG, "获取MP3播放器锁失败");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "播放文件: %s", file_path);
+
+    // 无论当前状态如何,都先完全停止和重置管道
