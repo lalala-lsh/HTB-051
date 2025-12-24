@@ -644,3 +644,132 @@ esp_err_t mp3_player_play(const char *file_path)
     ESP_LOGI(TAG, "播放文件: %s", file_path);
 
     // 无论当前状态如何,都先完全停止和重置管道
+    ESP_LOGD(TAG, "强制停止并重置管道");
+
+    esp_err_t stop_ret = mp3_player_stop_pipeline_locked(true);
+    if (stop_ret != ESP_OK) {
+        ESP_LOGW(TAG, "停止播放管道失败,继续尝试重新播放: %s", esp_err_to_name(stop_ret));
+    }
+
+    // 设置播放模式和文件路径
+    g_mp3_player->mode = MP3_PLAYER_MODE_ONCE;
+    strncpy(g_mp3_player->current_file, file_path, sizeof(g_mp3_player->current_file) - 1);
+    g_mp3_player->current_file[sizeof(g_mp3_player->current_file) - 1] = '\0';
+
+    // 在管道启动前配置I2S,避免运行中重配触发DMA分配失败。
+    ESP_LOGD(TAG, "配置一次性音频I2S参数: 16000Hz, 16位, 1声道");
+    esp_err_t i2s_reset_ret = mp3_player_prepare_i2s_clock_for_file_locked(file_path, false);
+    if (i2s_reset_ret != ESP_OK) {
+        ESP_LOGE(TAG, "配置一次性音频I2S参数失败,取消播放: %s", esp_err_to_name(i2s_reset_ret));
+        g_mp3_player->state = MP3_PLAYER_STATE_ERROR;
+        mp3_player_unlock();
+        return i2s_reset_ret;
+    }
+
+    // 设置文件URI
+    audio_element_set_uri(g_mp3_player->spiffs_stream_reader, file_path);
+
+    // 清空 I2S 缓冲区,避免播放残留数据产生爆音
+    audio_element_reset_output_ringbuf(g_mp3_player->i2s_stream_writer);
+
+    // 启动播放
+    esp_err_t ret = audio_pipeline_run(g_mp3_player->pipeline);
+    if (ret == ESP_OK) {
+        g_mp3_player->state = MP3_PLAYER_STATE_PLAYING;
+        ESP_LOGI(TAG, "播放开始");
+    } else {
+        ESP_LOGE(TAG, "开始播放失败: %s", esp_err_to_name(ret));
+        g_mp3_player->state = MP3_PLAYER_STATE_ERROR;
+    }
+
+    mp3_player_unlock();
+    return ret;
+}
+
+esp_err_t mp3_player_play_loop(const char *file_path)
+{
+    if (!mp3_player_is_enabled()) {
+        ESP_LOGE(TAG, "MP3播放器未初始化或已禁用");
+        return ESP_FAIL;
+    }
+
+    if (!file_path) {
+        ESP_LOGE(TAG, "无效的文件路径");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (!mp3_player_lock()) {
+        ESP_LOGE(TAG, "获取MP3播放器锁失败");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "循环播放文件: %s", file_path);
+
+    // 无论当前状态如何,都先完全停止和重置管道
+    ESP_LOGD(TAG, "强制停止并重置管道");
+
+    esp_err_t stop_ret = mp3_player_stop_pipeline_locked(true);
+    if (stop_ret != ESP_OK) {
+        ESP_LOGW(TAG, "停止播放管道失败,继续尝试循环播放: %s", esp_err_to_name(stop_ret));
+    }
+
+    // 设置播放模式和文件路径
+    g_mp3_player->mode = MP3_PLAYER_MODE_LOOP;
+    strncpy(g_mp3_player->current_file, file_path, sizeof(g_mp3_player->current_file) - 1);
+    g_mp3_player->current_file[sizeof(g_mp3_player->current_file) - 1] = '\0';
+
+    // 在管道启动前配置背景音乐I2S,避免运行中重配触发DMA分配失败。
+    esp_err_t i2s_ret = mp3_player_prepare_i2s_clock_for_file_locked(file_path, true);
+    if (i2s_ret != ESP_OK) {
+        ESP_LOGE(TAG, "配置循环音频I2S参数失败,取消播放: %s", esp_err_to_name(i2s_ret));
+        g_mp3_player->state = MP3_PLAYER_STATE_ERROR;
+        mp3_player_unlock();
+        return i2s_ret;
+    }
+
+    // 设置文件URI
+    audio_element_set_uri(g_mp3_player->spiffs_stream_reader, file_path);
+
+    // 清空 I2S 缓冲区,避免播放残留数据产生爆音
+    audio_element_reset_output_ringbuf(g_mp3_player->i2s_stream_writer);
+
+    // 启动播放
+    esp_err_t ret = audio_pipeline_run(g_mp3_player->pipeline);
+    if (ret == ESP_OK) {
+        g_mp3_player->state = MP3_PLAYER_STATE_PLAYING;
+        ESP_LOGI(TAG, "循环播放开始");
+    } else {
+        ESP_LOGE(TAG, "开始循环播放失败: %s", esp_err_to_name(ret));
+        g_mp3_player->state = MP3_PLAYER_STATE_ERROR;
+    }
+
+    mp3_player_unlock();
+    return ret;
+}
+
+esp_err_t mp3_player_stop(void)
+{
+    if (!mp3_player_is_enabled()) {
+        ESP_LOGE(TAG, "MP3播放器未初始化或已禁用");
+        return ESP_FAIL;
+    }
+
+    if (!mp3_player_lock()) {
+        ESP_LOGE(TAG, "获取MP3播放器锁失败");
+        return ESP_FAIL;
+    }
+
+    if (g_mp3_player->state != MP3_PLAYER_STATE_PLAYING && g_mp3_player->state != MP3_PLAYER_STATE_PAUSED) {
+        /* 非播放状态下 stop 属于幂等调用，降级为调试日志避免误报 */
+        ESP_LOGD(TAG, "播放器没有在播放或暂停,当前状态: %d", g_mp3_player->state);
+        mp3_player_unlock();
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "停止播放");
+
+    esp_err_t ret = mp3_player_stop_pipeline_locked(true);
+    if (ret == ESP_OK) {
+        g_mp3_player->state = MP3_PLAYER_STATE_STOPPED;
+        g_mp3_player->mode = MP3_PLAYER_MODE_ONCE;
+        memset(g_mp3_player->current_file, 0, sizeof(g_mp3_player->current_file));
