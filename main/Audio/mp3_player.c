@@ -773,3 +773,133 @@ esp_err_t mp3_player_stop(void)
         g_mp3_player->state = MP3_PLAYER_STATE_STOPPED;
         g_mp3_player->mode = MP3_PLAYER_MODE_ONCE;
         memset(g_mp3_player->current_file, 0, sizeof(g_mp3_player->current_file));
+        ESP_LOGI(TAG, "播放停止");
+    } else {
+        ESP_LOGE(TAG, "停止播放失败");
+    }
+
+    mp3_player_unlock();
+    return ret;
+}
+
+esp_err_t mp3_player_set_volume(int volume)
+{
+    return mp3_player_set_volume_internal(volume, true);
+}
+
+static esp_err_t mp3_player_set_volume_internal(int volume, bool save_to_nvs)
+{
+    (void)save_to_nvs;  // 暂时不使用NVS保存功能
+
+    if (!mp3_player_is_initialized()) {
+        ESP_LOGE(TAG, "MP3播放器未初始化");
+        return ESP_FAIL;
+    }
+
+    if (volume < 0 || volume > 100) {
+        ESP_LOGE(TAG, "无效的音量值: %d (0-100)", volume);
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    g_mp3_player->volume = volume;
+
+    // 设置硬件音量 - 直接使用0-100范围
+    esp_err_t ret = ESP_FAIL;
+    if (g_mp3_player->board_handle && g_mp3_player->board_handle->audio_hal) {
+        ret = audio_hal_set_volume(g_mp3_player->board_handle->audio_hal, volume);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "设置音量失败");
+            return ret;
+        }
+        ESP_LOGI(TAG, "音量已设置: %d", volume);
+    } else {
+        ESP_LOGE(TAG, "音频硬件未初始化");
+        return ESP_FAIL;
+    }
+
+    return ret;
+}
+
+int mp3_player_get_volume(void)
+{
+    if (!mp3_player_is_initialized()) {
+        ESP_LOGE(TAG, "MP3播放器未初始化");
+        return -1;
+    }
+
+    return g_mp3_player->volume;
+}
+
+mp3_player_state_t mp3_player_get_state(void)
+{
+    if (!mp3_player_is_initialized()) {
+        return MP3_PLAYER_STATE_ERROR;
+    }
+
+    return g_mp3_player->state;
+}
+
+mp3_player_mode_t mp3_player_get_mode(void)
+{
+    mp3_player_mode_t mode = MP3_PLAYER_MODE_ONCE;
+
+    if (!mp3_player_lock()) {
+        return mode;
+    }
+
+    if (mp3_player_is_initialized_unsafe()) {
+        mode = g_mp3_player->mode;
+    }
+
+    mp3_player_unlock();
+    return mode;
+}
+
+esp_err_t mp3_player_wait_for_finish(uint32_t timeout_ms)
+{
+    if (!mp3_player_lock()) {
+        ESP_LOGE(TAG, "获取MP3播放器锁失败");
+        return ESP_FAIL;
+    }
+
+    if (!mp3_player_is_enabled_unsafe()) {
+        mp3_player_unlock();
+        ESP_LOGE(TAG, "MP3播放器未初始化或已禁用");
+        return ESP_FAIL;
+    }
+
+    mp3_player_mode_t mode = g_mp3_player->mode;
+    mp3_player_state_t state = g_mp3_player->state;
+    mp3_player_unlock();
+
+    if (mode == MP3_PLAYER_MODE_LOOP) {
+        ESP_LOGW(TAG, "循环播放模式不支持等待完成");
+        return ESP_FAIL;
+    }
+
+    if (state != MP3_PLAYER_STATE_PLAYING) {
+        ESP_LOGW(TAG, "播放器没有在播放,当前状态: %d", state);
+        return ESP_OK;  // 没有在播放,认为已经完成
+    }
+
+    ESP_LOGD(TAG, "等待播放完成,超时: %" PRIu32 " ms", timeout_ms);
+
+    TickType_t start_time = xTaskGetTickCount();
+    TickType_t timeout_ticks = (timeout_ms == 0) ? portMAX_DELAY : pdMS_TO_TICKS(timeout_ms);
+
+    while (state == MP3_PLAYER_STATE_PLAYING) {
+        if (timeout_ms > 0) {
+            TickType_t elapsed = xTaskGetTickCount() - start_time;
+            if (elapsed >= timeout_ticks) {
+                ESP_LOGW(TAG, "等待播放完成超时");
+                mp3_player_stop();
+                return ESP_ERR_TIMEOUT;
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));  // 每50ms检查一次状态
+
+        if (!mp3_player_lock()) {
+            ESP_LOGW(TAG, "等待播放完成时获取锁失败");
+            return ESP_FAIL;
+        }
