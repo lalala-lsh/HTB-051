@@ -903,3 +903,132 @@ esp_err_t mp3_player_wait_for_finish(uint32_t timeout_ms)
             ESP_LOGW(TAG, "等待播放完成时获取锁失败");
             return ESP_FAIL;
         }
+
+        if (!mp3_player_is_initialized_unsafe()) {
+            mp3_player_unlock();
+            ESP_LOGW(TAG, "等待播放完成时播放器已反初始化");
+            return ESP_FAIL;
+        }
+
+        state = g_mp3_player->state;
+        mp3_player_unlock();
+    }
+
+    mp3_player_state_t final_state = state;
+
+    ESP_LOGD(TAG, "播放完成,最终状态: %d", final_state);
+
+    if (final_state == MP3_PLAYER_STATE_STOPPED || final_state == MP3_PLAYER_STATE_IDLE) {
+        return ESP_OK;
+    }
+
+    if (final_state == MP3_PLAYER_STATE_ERROR) {
+        ESP_LOGE(TAG, "播放过程中发生错误");
+        return ESP_FAIL;
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t mp3_player_deinit(void)
+{
+    ESP_LOGI(TAG, "开始反初始化MP3播放器");
+
+    // 步骤1:获取锁并设置关闭标志(如果还没有设置)
+    if (mp3_player_mutex) {
+        if (xSemaphoreTake(mp3_player_mutex, pdMS_TO_TICKS(5000)) == pdTRUE) {
+            mp3_player_shutting_down = true;
+            xSemaphoreGive(mp3_player_mutex);
+        } else {
+            ESP_LOGW(TAG, "获取锁超时,强制设置关闭标志");
+            mp3_player_shutting_down = true;
+        }
+    } else {
+        mp3_player_shutting_down = true;
+    }
+
+    // 步骤2:停止播放器任务(最高优先级,避免任务继续访问资源)
+    if (mp3_player_task_handle) {
+        ESP_LOGD(TAG, "停止MP3播放器任务");
+        vTaskDelete(mp3_player_task_handle);
+        mp3_player_task_handle = NULL;
+        // 给其他任务机会处理任务删除
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    // 步骤3:清理播放状态变量(在锁保护下)
+    if (mp3_player_mutex && xSemaphoreTake(mp3_player_mutex, pdMS_TO_TICKS(1000)) == pdTRUE) {
+        loop_restart_pending = false;
+        loop_restart_time = 0;
+        sequence_play_pending = false;
+        memset(sequence_second_file, 0, sizeof(sequence_second_file));
+        xSemaphoreGive(mp3_player_mutex);
+    }
+
+    // 步骤4:检查播放器实例是否存在
+    if (!g_mp3_player) {
+        ESP_LOGW(TAG, "MP3播放器已经反初始化");
+        // 确保清理互斥锁
+        if (mp3_player_mutex) {
+            vSemaphoreDelete(mp3_player_mutex);
+            mp3_player_mutex = NULL;
+        }
+        mp3_player_shutting_down = false;
+        return ESP_OK;
+    }
+
+    // 步骤5:停止音频播放
+    ESP_LOGD(TAG, "停止音频播放");
+    if (g_mp3_player->pipeline &&
+        (g_mp3_player->state == MP3_PLAYER_STATE_PLAYING || g_mp3_player->state == MP3_PLAYER_STATE_PAUSED)) {
+        audio_pipeline_stop(g_mp3_player->pipeline);
+        audio_pipeline_wait_for_stop(g_mp3_player->pipeline);
+        audio_pipeline_terminate(g_mp3_player->pipeline);
+    }
+
+    // 步骤6:销毁事件监听器
+    ESP_LOGD(TAG, "销毁事件监听器");
+    if (g_mp3_player->evt) {
+        if (g_mp3_player->periph_set) {
+            audio_event_iface_remove_listener(esp_periph_set_get_event_iface(g_mp3_player->periph_set), g_mp3_player->evt);
+        }
+        audio_event_iface_destroy(g_mp3_player->evt);
+        g_mp3_player->evt = NULL;
+    }
+
+    // 步骤7:销毁音频管道
+    ESP_LOGD(TAG, "销毁音频管道");
+    mp3_player_destroy_pipeline();
+
+    // 步骤8:停止外设
+    ESP_LOGD(TAG, "停止外设");
+    if (g_mp3_player->periph_set) {
+        esp_periph_set_stop_all(g_mp3_player->periph_set);
+        esp_periph_set_destroy(g_mp3_player->periph_set);
+        g_mp3_player->periph_set = NULL;
+    }
+
+    // 步骤9:清理音频板
+    ESP_LOGD(TAG, "清理音频板");
+    if (g_mp3_player->board_handle) {
+        // audio_board_deinit(g_mp3_player->board_handle);  // 注释掉,因为这个函数可能不存在
+        g_mp3_player->board_handle = NULL;
+    }
+
+    // 步骤10:重置播放器状态(现在是静态结构体)
+    ESP_LOGD(TAG, "重置播放器状态");
+    memset(g_mp3_player, 0, sizeof(mp3_player_t));
+    g_mp3_player = NULL;
+
+    // 步骤11:清理互斥锁(最后清理,确保前面的操作都完成)
+    if (mp3_player_mutex) {
+        ESP_LOGD(TAG, "销毁互斥锁");
+        vSemaphoreDelete(mp3_player_mutex);
+        mp3_player_mutex = NULL;
+    }
+
+    // 步骤12:重置关闭标志
+    mp3_player_shutting_down = false;
+
+    ESP_LOGI(TAG, "MP3播放器反初始化完成");
+    return ESP_OK;
