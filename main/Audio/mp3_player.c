@@ -1032,3 +1032,132 @@ esp_err_t mp3_player_deinit(void)
 
     ESP_LOGI(TAG, "MP3播放器反初始化完成");
     return ESP_OK;
+}
+
+/**
+ * @brief 内部函数:重启循环播放(完整重置版本)
+ */
+static esp_err_t mp3_player_restart_loop_playback(void)
+{
+    if (!mp3_player_lock()) {
+        ESP_LOGW(TAG, "循环重启时获取MP3播放器锁失败");
+        return ESP_FAIL;
+    }
+
+    if (!g_mp3_player || !g_mp3_player->current_file[0]) {
+        mp3_player_unlock();
+        return ESP_FAIL;
+    }
+
+    ESP_LOGD(TAG, "重启循环播放: %s", g_mp3_player->current_file);
+
+    // #region agent log (H1c: 循环重启)
+    // ESP_LOGI(TAG, "[DBG] 循环重启开始: file=%s", g_mp3_player->current_file);
+    // #endregion
+
+    // 静音编解码器,防止管道重启时I2S DMA瞬态产生杂音
+    if (g_mp3_player->board_handle && g_mp3_player->board_handle->audio_hal) {
+        audio_hal_set_volume(g_mp3_player->board_handle->audio_hal, 0);
+    }
+
+    esp_err_t stop_ret = mp3_player_stop_pipeline_locked(true);
+    if (stop_ret != ESP_OK) {
+        ESP_LOGW(TAG, "停止循环播放管道失败,继续尝试重启: %s", esp_err_to_name(stop_ret));
+    }
+
+    esp_err_t i2s_ret = mp3_player_prepare_i2s_clock_for_file_locked(g_mp3_player->current_file, true);
+    if (i2s_ret != ESP_OK) {
+        if (g_mp3_player->board_handle && g_mp3_player->board_handle->audio_hal) {
+            audio_hal_set_volume(g_mp3_player->board_handle->audio_hal, g_mp3_player->volume);
+        }
+        ESP_LOGE(TAG, "循环重启前配置I2S参数失败: %s", esp_err_to_name(i2s_ret));
+        g_mp3_player->state = MP3_PLAYER_STATE_ERROR;
+        mp3_player_unlock();
+        return i2s_ret;
+    }
+
+    audio_element_set_uri(g_mp3_player->spiffs_stream_reader, g_mp3_player->current_file);
+    audio_element_reset_output_ringbuf(g_mp3_player->i2s_stream_writer);
+
+    esp_err_t ret = audio_pipeline_run(g_mp3_player->pipeline);
+    if (ret == ESP_OK) {
+        g_mp3_player->state = MP3_PLAYER_STATE_PLAYING;
+        // 等待解码器填充I2S缓冲区后恢复音量(一个MP3帧约26ms,50ms足够)
+        vTaskDelay(pdMS_TO_TICKS(50));
+        if (g_mp3_player->board_handle && g_mp3_player->board_handle->audio_hal) {
+            audio_hal_set_volume(g_mp3_player->board_handle->audio_hal, g_mp3_player->volume);
+        }
+        // #region agent log (H1c)
+        // ESP_LOGI(TAG, "[DBG] 循环重启成功, 音量已恢复=%d", g_mp3_player->volume);
+        // #endregion
+    } else {
+        // 失败时也恢复音量
+        if (g_mp3_player->board_handle && g_mp3_player->board_handle->audio_hal) {
+            audio_hal_set_volume(g_mp3_player->board_handle->audio_hal, g_mp3_player->volume);
+        }
+        ESP_LOGE(TAG, "循环播放重启失败: %s", esp_err_to_name(ret));
+        g_mp3_player->state = MP3_PLAYER_STATE_ERROR;
+    }
+
+    mp3_player_unlock();
+    return ret;
+}
+
+void mp3_player_task(void *pvParameters)
+{
+    ESP_LOGD(TAG, "MP3播放器任务开始");
+
+    while (true) {
+        // 检查是否需要退出任务
+        if (!mp3_player_lock()) {
+            // 无法获取锁,可能系统正在关闭
+            vTaskDelay(50 / portTICK_PERIOD_MS);
+            continue;
+        }
+
+        // 检查播放器状态
+        if (!mp3_player_is_initialized_unsafe() || mp3_player_shutting_down) {
+            mp3_player_unlock();
+            break;
+        }
+
+        mp3_player_unlock();
+
+        // 处理音频事件
+        mp3_player_handle_audio_events();
+
+        // 检查是否需要重启循环播放(在锁保护下)
+        if (mp3_player_lock()) {
+            bool should_restart = false;
+            char restart_file[256] = {0};
+
+            if (loop_restart_pending && xTaskGetTickCount() >= loop_restart_time) {
+                loop_restart_pending = false;
+
+                // 确认仍在循环模式且需要播放
+                if (g_mp3_player &&
+                    g_mp3_player->mode == MP3_PLAYER_MODE_LOOP &&
+                    g_mp3_player->state == MP3_PLAYER_STATE_PLAYING &&
+                    g_mp3_player->current_file[0] != '\0') {
+
+                    should_restart = true;
+                    strncpy(restart_file, g_mp3_player->current_file, sizeof(restart_file) - 1);
+                    restart_file[sizeof(restart_file) - 1] = '\0';
+                }
+            }
+
+            mp3_player_unlock();
+
+            if (should_restart) {
+                ESP_LOGD(TAG, "执行延时循环重启");
+                mp3_player_restart_loop_playback();
+            }
+        }
+
+        // 适当延时(确保其他任务能够运行)
+        vTaskDelay(20 / portTICK_PERIOD_MS);
+    }
+
+    ESP_LOGD(TAG, "MP3播放器任务结束");
+    vTaskDelete(NULL);
+}
