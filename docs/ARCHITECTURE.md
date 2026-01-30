@@ -185,3 +185,97 @@ htb-051/
 | `device_params.c/h` | 设备参数单例：从 NVS 加载、提供 Getter/Setter；被灯光、传感器、音频、IoT 等共同使用 |
 | `settings.c/h` | NVS 封装：`settings_start` / `settings_end`、按命名空间读写字符串/整型/布尔，脏数据自动提交 |
 | `system_info.c/h` | 系统信息（SN、MAC、设备名等）的初始化与查询 |
+| `factory.c/h` | 恢复出厂：备份 SN、擦除 NVS、恢复 SN、重启；与按键长按等入口对接 |
+| `CMakeLists.txt` / `Kconfig.projbuild` / `idf_component.yml` | 构建、配置与组件依赖 |
+
+---
+
+## 5. 初始化顺序与依赖关系
+
+`app_main` 中的顺序体现了模块间依赖，不可随意调换：
+
+```
+1. esp_event_loop_create_default()
+2. nvs_flash_init() [含异常时 erase 再 init]
+3. system_info_init()
+4. device_params_init()           // 依赖 NVS，供后续所有模块读参数
+5. light_control_start()         // LEDC、light_manager、button_manager
+6. mp3_player_init()             // 初始化 I2C（Codec），必须先于 sensor
+7. audio_queue_init()
+8. sensor_control_init()         // 依赖 I2C（BH1750）
+9. blufi_init()
+10. sntp_service_init()
+11. param_handler_init()
+12. device_param_handler_init()
+13. light_param_handler_init()
+14. sensor_param_handler_init()  // 以上 4 个为 MQTT 参数路由注册
+15. mqtt_client_init()
+16. audio_queue_play(WELCOME, ...)
+17. flash_sn_init()
+18. log_clear()
+19. while(1) { 堆统计; delay 10s }
+```
+
+关键依赖链简述：
+
+- **NVS** → system_info / device_params / settings。  
+- **I2C**：mp3_player 先初始化 I2C → sensor_control（BH1750）才能用。  
+- **param_handler 注册**：必须在 `mqtt_client_init()` 之前完成，以便收到 MQTT 时能正确分发到各 handler。
+
+---
+
+## 6. 数据流与控制流摘要
+
+### 6.1 按键 → 灯光 → MQTT
+
+1. `button_manager` 扫描到事件 → `on_button_event()`（在 light_control 中）。  
+2. 调用 `light_manager_*` 改变灯光状态/亮度。  
+3. `light_manager` 内部触发已注册的 `light_change_callback`。  
+4. 回调里可调用 `mqtt_notify_light_change()` 等，驱动 MQTT 上报。  
+5. 同时 sensor_control 通过同一回调更新 PIR/恒光相关状态（如恒光重新采样）。
+
+### 6.2 MQTT 设置参数 → 灯光/传感器
+
+1. MQTT 收到设置命令 → `protocol_parse` 解析出 CMD 与参数。  
+2. `param_handler_process()` 或 `param_handler_process_multi()` 按 key 查找注册的 handler。  
+3. `light_param_handler` / `sensor_param_handler` / `device_param_handler` 分别写 device_params 或调用 light_manager / sensor_control。  
+4. 灯光类会做状态比较，仅在变化时执行硬件操作并可能再次触发 `light_change_callback`。
+
+### 6.3 PIR / 恒光与灯光
+
+1. PIR 检测到无人超时 → sensor_control 调用 `light_manager_set_temporary_brightness_level` 调暗，或 `light_manager_turn_off_all` 关灯。  
+2. 调暗时记录“记忆亮度”，关灯前写回 NVS，保证下次上电恢复用户设定。  
+3. 恒光模块在灯光开启时通过 `constant_light_update_state()` 等参与调节；外部改灯时通过 `constant_light_on_light_change_external()` 重新建基准；PIR 调暗时恒光 suspend，恢复时 resume。
+
+---
+
+## 7. 关键设计模式与约定
+
+| 模式/约定 | 应用位置 |
+|-----------|----------|
+| **单例** | device_params、param_handler 注册表、get_light_manager() 等 |
+| **注册表/分发** | param_handler：key → handler，MQTT 命令统一入口后按 key 分发 |
+| **回调驱动** | 按键 → on_button_event；灯光变化 → light_change_callback；A2DP 事件回调等 |
+| **不透明类型 + create/destroy** | light_manager_t、button_manager_t、settings_t 等 |
+| **状态比较后写硬件** | MQTT 设置灯光/光疗时先读再比较，避免多余 PWM 与回调 |
+| **亮度变化来源标识** | 区分 EXTERNAL / PIR / CONSTANT_LIGHT，用于是否触发回调与 MQTT 同步 |
+
+---
+
+## 8. 与外部组件的关系
+
+- **BluFi**（`components/blufi/`）：配网后 `blufi_deinit()` 释放蓝牙，保留 WiFi；运行期 WiFi 断线有周期扫描重连逻辑。  
+- **my_board**（`components/my_board/`）：ESP-ADF 板级与 Codec 配置，决定 I2C 等引脚，与 `board_pins.h` 配合。  
+- **managed_components**：如 cJSON、nghttp、esp_websocket_client、bh1750、esp-dsp 等由 idf 组件管理，在 `idf_component.yml` 中声明。
+
+---
+
+## 9. 文档与配置参考
+
+- 开发环境、构建命令、MQTT 协议细节、常见任务与调试技巧见项目根目录 **CLAUDE.md**。  
+- 分区表见 **partitions_dld.csv**（OTA 双分区、SPIFFS 等）。  
+- 默认编译与功能选项见 **sdkconfig.defaults**。
+
+---
+
+*文档版本与固件版本 1.3.1 对应，如有结构变更请同步更新本文档。*
