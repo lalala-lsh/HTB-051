@@ -1,0 +1,16 @@
+.vscode/
+build/
+*.lock
+sdkconfig*
+!sdkconfig.defaults
+demo_code/
+main/test.md
+*.pdf
+.cache/
+.claude/
+.clangd
+CLAUDE.md
+managed_components/
+.github/
+.cursor/
+docs/
