@@ -1,0 +1,18 @@
+menu "Project Configuration"
+
+    config EXAMPLE_DEFAULT_SN_CODE
+        string "Default SN Code"
+        default "SN99999999999999"
+        help
+            Default SN code used when no SN is stored in NVS.
+            Must be exactly 16 characters long.
+
+    config EXAMPLE_DEFAULT_DEVICE_NAME
+        string "Default Device Name"
+        default "HTB-001"
+        help
+            Default device name used when no name is stored in NVS.
+            Maximum 31 characters.
+
+
+endmenu
