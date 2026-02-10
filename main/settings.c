@@ -107,3 +107,111 @@ esp_err_t settings_end(settings_t* settings)
         }
         nvs_close(settings->nvs_handle);
         settings->nvs_handle = 0;
+    }
+
+    /* 释放内存*/
+    if (settings->ns != NULL) {
+        free(settings->ns);
+        settings->ns = NULL;
+    }
+    free(settings);
+
+    return ret;
+}
+
+/**
+ * @brief 复制默认值到缓冲区的辅助函数
+ */
+static esp_err_t copy_default_value(char* buffer, size_t buffer_size, const char* default_value)
+{
+    if (default_value == NULL) {
+        if (buffer_size > 0) {
+            buffer[0] = '\0';
+        }
+        return ESP_ERR_NVS_NOT_FOUND;
+    }
+
+    size_t default_len = strlen(default_value);
+    if (default_len >= buffer_size) {
+        ESP_LOGE(TAG, "Buffer too small for default value");
+        if (buffer_size > 0) {
+            buffer[0] = '\0';
+        }
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    memcpy(buffer, default_value, default_len + 1);
+    return ESP_ERR_NVS_NOT_FOUND;
+}
+
+esp_err_t settings_get_string(settings_t* settings, const char* key,
+                               char* buffer, size_t buffer_size,
+                               const char* default_value)
+{
+    if (buffer == NULL || buffer_size == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    if (settings == NULL || key == NULL) {
+        return copy_default_value(buffer, buffer_size, default_value);
+    }
+
+    if (settings->nvs_handle == 0) {
+        return copy_default_value(buffer, buffer_size, default_value);
+    }
+
+    /* 获取字符串长度 */
+    size_t length = 0;
+    esp_err_t err = nvs_get_str(settings->nvs_handle, key, NULL, &length);
+    if (err != ESP_OK) {
+        return copy_default_value(buffer, buffer_size, default_value);
+    }
+
+    /* 检查缓冲区大小 */
+    if (length > buffer_size) {
+        ESP_LOGE(TAG, "Buffer too small: need %zu, got %zu", length, buffer_size);
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    /* 读取字符串到用户提供的缓冲区 */
+    err = nvs_get_str(settings->nvs_handle, key, buffer, &length);
+    if (err != ESP_OK) {
+        return copy_default_value(buffer, buffer_size, default_value);
+    }
+
+    /* 去除尾部多余的'\0' */
+    while (length > 1 && buffer[length - 1] == '\0') {
+        length--;
+    }
+    buffer[length] = '\0';
+
+    return ESP_OK;
+}
+
+void settings_set_string(settings_t* settings, const char* key, const char* value)
+{
+    if (settings == NULL || key == NULL || value == NULL) {
+        ESP_LOGE(TAG, "Invalid parameters");
+        return;
+    }
+
+    if (!settings->read_write) {
+        ESP_LOGW(TAG, "Namespace '%s' is not open for writing", settings->ns);
+        return;
+    }
+
+    esp_err_t ret = nvs_set_str(settings->nvs_handle, key, value);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set string '%s': %s", key, esp_err_to_name(ret));
+        return;
+    }
+
+    settings->dirty = true;
+}
+
+int32_t settings_get_int(settings_t* settings, const char* key, int32_t default_value)
+{
+    if (settings == NULL || key == NULL) {
+        return default_value;
+    }
+
