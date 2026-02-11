@@ -215,3 +215,112 @@ int32_t settings_get_int(settings_t* settings, const char* key, int32_t default_
         return default_value;
     }
 
+    if (settings->nvs_handle == 0) {
+        return default_value;
+    }
+
+    int32_t value;
+    esp_err_t err = nvs_get_i32(settings->nvs_handle, key, &value);
+    if (err != ESP_OK) {
+        return default_value;
+    }
+
+    return value;
+}
+
+void settings_set_int(settings_t* settings, const char* key, int32_t value)
+{
+    if (settings == NULL || key == NULL) {
+        ESP_LOGE(TAG, "Invalid parameters");
+        return;
+    }
+
+    if (!settings->read_write) {
+        ESP_LOGW(TAG, "Namespace '%s' is not open for writing", settings->ns);
+        return;
+    }
+
+    esp_err_t ret = nvs_set_i32(settings->nvs_handle, key, value);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set int '%s': %s", key, esp_err_to_name(ret));
+        return;
+    }
+
+    settings->dirty = true;
+}
+
+bool settings_get_bool(settings_t* settings, const char* key, bool default_value)
+{
+    if (settings == NULL || key == NULL) {
+        return default_value;
+    }
+
+    if (settings->nvs_handle == 0) {
+        return default_value;
+    }
+
+    uint8_t value;
+    esp_err_t err = nvs_get_u8(settings->nvs_handle, key, &value);
+    if (err != ESP_OK) {
+        return default_value;
+    }
+
+    return value != 0;
+}
+
+void settings_set_bool(settings_t* settings, const char* key, bool value)
+{
+    if (settings == NULL || key == NULL) {
+        ESP_LOGE(TAG, "Invalid parameters");
+        return;
+    }
+
+    if (!settings->read_write) {
+        ESP_LOGW(TAG, "Namespace '%s' is not open for writing", settings->ns);
+        return;
+    }
+
+    esp_err_t ret = nvs_set_u8(settings->nvs_handle, key, value ? 1 : 0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to set bool '%s': %s", key, esp_err_to_name(ret));
+        return;
+    }
+
+    settings->dirty = true;
+}
+
+void settings_erase_key(settings_t* settings, const char* key)
+{
+    if (settings == NULL || key == NULL) {
+        ESP_LOGE(TAG, "Invalid parameters");
+        return;
+    }
+
+    if (!settings->read_write) {
+        ESP_LOGW(TAG, "Namespace '%s' is not open for writing", settings->ns);
+        return;
+    }
+
+    esp_err_t ret = nvs_erase_key(settings->nvs_handle, key);
+    if (ret != ESP_OK && ret != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGE(TAG, "Failed to erase key '%s': %s", key, esp_err_to_name(ret));
+    }
+}
+
+void settings_erase_all(settings_t* settings)
+{
+    if (settings == NULL) {
+        ESP_LOGE(TAG, "Invalid parameters");
+        return;
+    }
+
+    if (!settings->read_write) {
+        ESP_LOGW(TAG, "Namespace '%s' is not open for writing", settings->ns);
+        return;
+    }
+
+    esp_err_t ret = nvs_erase_all(settings->nvs_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to erase all keys: %s", esp_err_to_name(ret));
+    }
+}
