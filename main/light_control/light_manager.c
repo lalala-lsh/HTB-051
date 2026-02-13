@@ -1893,3 +1893,4 @@ esp_err_t light_manager_stop_red_blink(light_manager_t* manager)
     ESP_LOGI(TAG, "Red light blink stopped");
     UNLOCK(manager);
     return ESP_OK;
+}
